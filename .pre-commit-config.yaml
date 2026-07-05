@@ -1,0 +1,19 @@
+# Copy to: .pre-commit-config.yaml  (repo root)
+# Set up:  pipx install pre-commit  &&  pre-commit install
+# Checks locally before each commit that changed source files have an SPDX header —
+# catches it before it ever reaches the PR/CI.
+repos:
+  - repo: local
+    hooks:
+      - id: spdx-header
+        name: SPDX header check
+        language: system
+        files: \.(java|kt|ts|tsx|js|jsx)$
+        exclude: (^|/)(node_modules|build|dist|out|target|\.gradle)/
+        entry: bash -c 'for f in "$@"; do head -n 15 "$f" | grep -q "SPDX-License-Identifier:" || { echo "Missing SPDX header: $f"; exit 1; }; done' --
+
+# Stricter alternative to the grep above: the REUSE tool.
+#   - repo: https://github.com/fsfe/reuse-tool
+#     rev: v5.0.2            # check the current version before use
+#     hooks: [{ id: reuse }]
+# REUSE can also insert headers automatically: `reuse annotate --license <ID> --copyright "<HOLDER>" <file>`

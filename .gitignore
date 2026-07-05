@@ -1,0 +1,18 @@
+# Java / Gradle
+.gradle/
+build/
+out/
+*.class
+bin/
+# Node / Vite
+node_modules/
+dist/
+*.log
+# Env / secrets
+.env
+*.local
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
