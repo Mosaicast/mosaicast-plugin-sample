@@ -1,0 +1,24 @@
+{
+  "id": "sample",
+  "version": "2.0.1",
+  "platformApi": "0.3.0",
+  "name": "Sample",
+  "backend": {
+    "basePath": "/api/plugins/sample",
+    "extensions": ["dev.mosaicast.plugin.sample.SamplePlugin"]
+  },
+  "frontend": {
+    "entry": "sample.es.js",
+    "elements": ["sample-highlight"]
+  },
+  "slots": [
+    { "scope": "episode", "element": "sample-highlight", "placement": "main", "visibleTo": "anonymous", "order": 100 },
+    { "scope": "feed",    "element": "sample-highlight", "placement": "feed", "visibleTo": "anonymous", "order": 100 },
+    { "scope": "site",    "element": "sample-highlight", "placement": "site", "visibleTo": "anonymous", "order": 100 }
+  ],
+  "storage": "doc",
+  "config": {
+    "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }
+  },
+  "consent": { "categories": [], "externalSources": [] }
+}
