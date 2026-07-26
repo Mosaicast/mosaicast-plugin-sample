@@ -1,0 +1,15 @@
+{
+  "title.episode": "Episoden-Highlight",
+  "title.feed": "Podcast-Highlight",
+  "title.site": "Website-Highlight",
+  "editTitle.episode": "Episoden-Highlight bearbeiten",
+  "editTitle.feed": "Podcast-Highlight bearbeiten",
+  "editTitle.site": "Website-Highlight bearbeiten",
+  "noHighlight": "Noch kein Highlight.",
+  "edit": "Bearbeiten",
+  "save": "Speichern",
+  "saving": "Speichert…",
+  "cancel": "Abbrechen",
+  "markdownPlaceholder": "Highlight in Markdown schreiben…",
+  "stat": "{{highlighted}} von {{total}} Episoden hervorgehoben"
+}

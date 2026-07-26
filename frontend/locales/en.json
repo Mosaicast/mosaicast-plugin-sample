@@ -1,0 +1,15 @@
+{
+  "title.episode": "Episode Highlight",
+  "title.feed": "Podcast Highlight",
+  "title.site": "Site Highlight",
+  "editTitle.episode": "Edit episode highlight",
+  "editTitle.feed": "Edit podcast highlight",
+  "editTitle.site": "Edit site highlight",
+  "noHighlight": "No highlight yet.",
+  "edit": "Edit",
+  "save": "Save",
+  "saving": "Saving…",
+  "cancel": "Cancel",
+  "markdownPlaceholder": "Write a highlight in markdown…",
+  "stat": "{{highlighted}} of {{total}} episodes highlighted"
+}
