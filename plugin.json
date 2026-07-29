@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.0.1",
-  "platformApi": "0.3.0",
+  "version": "2.3.0",
+  "platformApi": "0.4.0",
   "name": "Sample",
   "backend": {
     "basePath": "/api/plugins/sample",
@@ -9,16 +9,53 @@
   },
   "frontend": {
     "entry": "sample.es.js",
-    "elements": ["sample-highlight"]
+    "elements": ["sample-highlight", "sample-highlight-settings"]
   },
   "slots": [
-    { "scope": "episode", "element": "sample-highlight", "placement": "main", "visibleTo": "anonymous", "order": 100 },
-    { "scope": "feed",    "element": "sample-highlight", "placement": "feed", "visibleTo": "anonymous", "order": 100 },
-    { "scope": "site",    "element": "sample-highlight", "placement": "site", "visibleTo": "anonymous", "order": 100 }
+    { "scope": "episode", "element": "sample-highlight",          "placement": "main",    "visibleTo": "anonymous", "order": 100 },
+    { "scope": "feed",    "element": "sample-highlight",          "placement": "feed",    "visibleTo": "anonymous", "order": 100 },
+    { "scope": "site",    "element": "sample-highlight",          "placement": "site",    "visibleTo": "anonymous", "order": 100 },
+    { "scope": "site",    "element": "sample-highlight",          "placement": "page",    "visibleTo": "anonymous", "order": 100 },
+    { "scope": "site",    "element": "sample-highlight-settings", "placement": "sidebar", "visibleTo": "podcaster", "order": 100 }
   ],
   "storage": "doc",
   "config": {
     "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }
   },
-  "consent": { "categories": [], "externalSources": [] }
+  "consent": {
+    "services": [
+      {
+        "id": "plausible-highlight-analytics",
+        "name": "Plausible Analytics (demo)",
+        "provider": "Plausible Insights OÜ (example — fake for this reference plugin)",
+        "category": "analytics",
+        "privacyUrl": "https://plausible.example/privacy",
+        "hosts": ["https://plausible.example"],
+        "thirdCountryTransfer": false,
+        "storage": []
+      },
+      {
+        "id": "host-badge-cdn",
+        "name": "Host Badge CDN (demo)",
+        "provider": "Example CDN Ltd. (example — fake for this reference plugin)",
+        "category": "functional",
+        "privacyUrl": "https://cdn.example.com/privacy",
+        "hosts": ["https://cdn.example.com"],
+        "thirdCountryTransfer": false,
+        "storage": []
+      },
+      {
+        "id": "share-widget",
+        "name": "Share Widget (demo)",
+        "provider": "Example Share Inc. (example — fake for this reference plugin)",
+        "category": "social",
+        "privacyUrl": "https://share.example.com/privacy",
+        "hosts": ["https://share.example.com"],
+        "thirdCountryTransfer": false,
+        "storage": [
+          { "name": "share_session", "type": "cookie", "purpose": "remembers an open share-widget session", "duration": "session" }
+        ]
+      }
+    ]
+  }
 }
