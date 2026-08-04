@@ -37,6 +37,7 @@
   "consent.functional.request": "Allow functional cookies to show the host's badge here",
   "consent.social.alt": "Share widget",
   "consent.social.request": "Allow the share widget to be shown here",
+  "consent.necessary.alt": "Highlight plugin wordmark (always shown, not gated by consent)",
 
   "settings.title": "Site Highlight Settings",
   "settings.hint": "Applies to every Episode/Podcast/Site Highlight tile across the whole site.",

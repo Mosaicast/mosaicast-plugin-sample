@@ -1,6 +1,6 @@
 {
   "id": "sample",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "platformApi": "0.4.0",
   "name": "Sample",
   "backend": {
@@ -55,6 +55,16 @@
         "storage": [
           { "name": "share_session", "type": "cookie", "purpose": "remembers an open share-widget session", "duration": "session" }
         ]
+      },
+      {
+        "id": "highlight-plugin-badge",
+        "name": "Highlight Plugin Badge (demo)",
+        "provider": "Example Static Assets Ltd. (example — fake for this reference plugin)",
+        "category": "necessary",
+        "privacyUrl": "https://static.example/privacy",
+        "hosts": ["https://static.example"],
+        "thirdCountryTransfer": false,
+        "storage": []
       }
     ]
   }

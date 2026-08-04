@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import type { PluginContext, PluginI18n } from '@mosaicast/plugin-sdk';
 
 /**
- * Three tiny widgets, one per service this plugin declares in `plugin.json`'s `consent.services[]` — so a
+ * Four tiny widgets, one per service this plugin declares in `plugin.json`'s `consent.services[]` — so a
  * plugin author can see every shape `ctx.consent` takes in one place (ARCHITECTURE §12.5):
  *
  * - `analytics` — a **known** category (the host has a translated label for it in the banner). Gates a
@@ -17,6 +17,13 @@ import type { PluginContext, PluginI18n } from '@mosaicast/plugin-sdk';
  * - `social` — an **unknown/custom** category: the host has no translated label for it and just passes it
  *   through verbatim (per `ConsentService.KNOWN_CATEGORIES` on the core side). Proves a plugin is not
  *   limited to the host's known vocabulary.
+ * - `necessary` — never gated: the badge below renders unconditionally, with no `has()` check and no
+ *   request button, because a `necessary` service is never offered as a choice in the first place (core
+ *   contributes its host to the CSP unconditionally too — see `ConsentService.allowedSources`). Until
+ *   core's storage/CSP-enforcement update, a `necessary` service had zero visitor-facing disclosure; it
+ *   now lists under "Always active" in the host's privacy settings (`necessaryServices` in the consent
+ *   payload), so this is also the one service here a visitor can actually see acknowledged without ever
+ *   being asked.
  *
  * `consent.onChange` IS wired here (unlike a pre-0.4.0 version of this file, which skipped it): consent
  * can be withdrawn — or granted from elsewhere, e.g. another plugin tile's `request()` for the same
@@ -27,6 +34,7 @@ import type { PluginContext, PluginI18n } from '@mosaicast/plugin-sdk';
 const ANALYTICS_ENDPOINT = 'https://plausible.example/api/event';
 const FUNCTIONAL_BADGE_SRC = 'https://cdn.example.com/highlight-badge.svg';
 const SOCIAL_WIDGET_SRC = 'https://share.example.com/badge.svg';
+const NECESSARY_BADGE_SRC = 'https://static.example/highlight-wordmark.svg';
 
 /** Fire-and-forget cookieless ping. Errors are swallowed: a blocked/failed beacon must never affect UI. */
 function pingAnalytics(): void {
@@ -100,6 +108,8 @@ export function ConsentExtras({
           {i18n.t('consent.social.request')}
         </button>
       )}
+      {/* necessary: unconditional — no has() check, no request button. See the class doc above. */}
+      <img className="badge" src={NECESSARY_BADGE_SRC} alt={i18n.t('consent.necessary.alt')} />
     </div>
   );
 }

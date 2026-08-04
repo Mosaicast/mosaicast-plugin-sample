@@ -30,7 +30,7 @@ links/share-metadata/sitemap all merged to `master` since 2.1.0. **2.3.0** moves
 | `episode?.status` | An "Upcoming episode — no spoilers yet" badge while `PLANNED`. |
 | `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). |
 | `api` | Every read/write — the highlight doc, the backend-computed stats doc, the site-wide settings doc, and (read-only) another episode's highlight in the deep-link view. |
-| `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), and `social`, a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`. `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
+| `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
 | `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
 | `player` | An optional per-highlight "key moment" (seconds): a "▶ Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "✓ played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
 | `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). |
@@ -85,23 +85,43 @@ change the heading or font in the sidebar panel, save, and reload any episode/fe
 is immediate and visible to anonymous visitors too.
 
 ## Consent (ARCHITECTURE §12.5, SDK 0.4.0 service-level model)
-`plugin.json` declares three **services** under `consent.services[]` (not the pre-0.4.0
+`plugin.json` declares four **services** under `consent.services[]` (not the pre-0.4.0
 `{categories, externalSources}` shape, which 0.4.0 rejects at load): `plausible-highlight-analytics`
-(category `analytics`), `host-badge-cdn` (category `functional`), and `share-widget` (category `social`,
+(category `analytics`), `host-badge-cdn` (category `functional`), `share-widget` (category `social`,
 arbitrary/unknown to the host — it passes an undeclared category through verbatim, proving a plugin isn't
-limited to `necessary`/`functional`/`analytics`). Each service's `hosts[]` is also the CSP allow-list for
-that origin — an origin left out stays blocked even after consent is granted.
+limited to `necessary`/`functional`/`analytics`), and `highlight-plugin-badge` (category `necessary` — see
+below). Each service's `hosts[]` is also the CSP allow-list for that origin — an origin left out stays
+blocked even after consent is granted, and, since core's storage/CSP-enforcement update, **narrowed per
+visitor**: the server mirrors the decision into an `mc_consent` cookie and only widens the CSP by what that
+cookie actually grants, so a declined category is a blocked request at the network layer, not just a
+skipped `ctx.consent.has()` check.
 
 `ConsentExtras.tsx` is the one place a plugin author sees the full 0.4.0 flow in one component:
 - **Denied** → a click-to-load button. Clicking calls `ctx.consent.request(category)` (never on mount —
   an unprompted call would turn a banner-free site into one with a banner) and logs the request/outcome via
   `ctx.log`.
 - **Granted** → the real content (the analytics ping fires, the badge/widget `<img>` renders).
+- **Necessary** → the fourth badge (`highlight-plugin-badge`, the plugin's own wordmark) is unconditional:
+  no `has()` check, no request button, because a `necessary` service is never offered as a choice in the
+  first place. Before core's storage/CSP-enforcement update, that meant zero visitor-facing disclosure for
+  it either; it now lists under "Always active" in the host's privacy settings (the `necessaryServices`
+  field on the consent payload), so this service is the one a visitor can actually see acknowledged
+  without ever being asked to decide on it.
 - `consent.granted()` renders a one-line summary at the top.
 - `consent.onChange` is wired (unlike a pre-0.4.0 version of this file, which skipped it on the — now
   incorrect — assumption that the host always remounts on a consent change): a withdrawal from the host's
   settings page, or a grant from another plugin tile requesting the same category, both flip this
   component back without a remount.
+
+**Declared storage and the sweep.** Only `share-widget` declares a storage item
+(`share_session`, a session cookie — the real widget would set this; this plugin never writes it itself,
+since the widget host is fake). The other three declare `storage: []`, honestly: none of them write any
+`localStorage`/cookie entry from this plugin's own code. That matters because core now **sweeps** undeclared
+storage — on load, and after every consent decision — down to what the visitor granted plus what core and
+`necessary` services declared; everything else is deleted, including keys no manifest ever mentioned (a
+dev-profile audit also warns about undeclared writes as they happen). A plugin's `storage[]` list is
+therefore load-bearing, not just documentation: declare less than you write and the sweep deletes it out
+from under you.
 
 ## Deep links need a `page` slot (learned the hard way)
 `/p/{pluginId}/*` is core-reserved (ARCHITECTURE §6.4), but core only routes there — and only calls
@@ -189,6 +209,13 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.4.0** — follows core's storage/CSP-enforcement update (the `mc_consent` cookie narrowing the CSP per
+  visitor, and the on-load/post-decision storage sweep that deletes anything no manifest declared). No code
+  change was *required* — `ctx.consent`'s contract didn't move, and this plugin already declared every
+  storage item it writes — but adds a fourth `necessary`-category service (`highlight-plugin-badge`) to
+  showcase the disclosure core's update newly gives that category: an unconditional badge, never gated by
+  `has()`, now listed under "Always active" in the host's privacy settings instead of being invisible to
+  visitors. See [Consent](#consent-architecture-125-sdk-040-service-level-model).
 - **2.3.0** — SDK **0.4.0** (`platformApi` bumped to match): consent redesigned around
   `consent.services[]`/`request()`/`granted()`/a real `onChange` (see [Consent](#consent-architecture-125-sdk-040-service-level-model));
   backend `ctx.logger()` added (config-clamp and malformed-stored-doc warnings, registration/recompute

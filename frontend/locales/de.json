@@ -37,6 +37,7 @@
   "consent.functional.request": "Funktionale Cookies erlauben, um das Badge des Hosts hier anzuzeigen",
   "consent.social.alt": "Share-Widget",
   "consent.social.request": "Share-Widget erlauben, um es hier anzuzeigen",
+  "consent.necessary.alt": "Highlight-Plugin-Wortmarke (immer sichtbar, nicht an Einwilligung gebunden)",
 
   "settings.title": "Website-Highlight-Einstellungen",
   "settings.hint": "Gilt für jede Episoden-/Podcast-/Website-Highlight-Kachel der gesamten Seite.",

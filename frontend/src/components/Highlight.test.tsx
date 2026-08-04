@@ -246,7 +246,7 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
     vi.unstubAllGlobals();
   });
 
-  it('shows a click-to-load button per category and pings no analytics beacon when every category is denied', async () => {
+  it('shows a click-to-load button per optional category, and only the necessary badge, when everything else is denied', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null));
     vi.stubGlobal('fetch', fetchSpy);
 
@@ -256,11 +256,14 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
     expect(container.textContent).toContain('Allow analytics');
     expect(container.textContent).toContain('Allow functional cookies');
     expect(container.textContent).toContain('Allow the share widget');
-    expect(container.querySelector('img.badge')).toBeNull();
+    // `necessary` is never gated — its badge renders even though every optional category was denied.
+    const badges = container.querySelectorAll('img.badge');
+    expect(badges).toHaveLength(1);
+    expect((badges[0] as HTMLImageElement).src).toBe('https://static.example/highlight-wordmark.svg');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('pings the analytics beacon and renders the declared external badges once every category is granted', async () => {
+  it('pings the analytics beacon and renders the declared external badges once every optional category is granted', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(null));
     vi.stubGlobal('fetch', fetchSpy);
 
@@ -274,10 +277,11 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
     expect(fetchSpy).toHaveBeenCalledWith('https://plausible.example/api/event', expect.objectContaining({ method: 'POST' }));
     expect(container.textContent).toContain('Anonymous view counted');
     const badges = container.querySelectorAll('img.badge');
-    expect(badges).toHaveLength(2);
+    expect(badges).toHaveLength(3);
     expect(Array.from(badges).map((img) => (img as HTMLImageElement).src).sort()).toEqual([
       'https://cdn.example.com/highlight-badge.svg',
       'https://share.example.com/badge.svg',
+      'https://static.example/highlight-wordmark.svg',
     ]);
   });
 
@@ -297,7 +301,9 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
     });
 
     expect(consent.requests).toEqual(['functional']);
-    expect(container.querySelector('img.badge')).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('img.badge')).map((img) => (img as HTMLImageElement).src),
+    ).toContain('https://cdn.example.com/highlight-badge.svg');
     expect(ctx.logs).toContainEqual({ level: 'info', message: 'consent: requesting "functional"' });
     expect(ctx.logs).toContainEqual({ level: 'info', message: 'consent: "functional" granted' });
   });
@@ -307,14 +313,18 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
     const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, consent });
     const container = mount(ctx);
     await flush();
-    expect(container.querySelector('img.badge')).not.toBeNull();
+    const badgeSrcs = () =>
+      Array.from(container.querySelectorAll('img.badge')).map((img) => (img as HTMLImageElement).src);
+    expect(badgeSrcs()).toContain('https://cdn.example.com/highlight-badge.svg');
 
     act(() => {
       consent.revoke('functional');
     });
     await flush();
 
-    expect(container.querySelector('img.badge')).toBeNull();
+    // The functional badge is gone, but the necessary one is unaffected by any decision.
+    expect(badgeSrcs()).not.toContain('https://cdn.example.com/highlight-badge.svg');
+    expect(badgeSrcs()).toContain('https://static.example/highlight-wordmark.svg');
     expect(container.textContent).toContain('Allow functional cookies');
   });
 
