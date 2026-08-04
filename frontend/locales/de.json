@@ -11,5 +11,42 @@
   "saving": "Speichert…",
   "cancel": "Abbrechen",
   "markdownPlaceholder": "Highlight in Markdown schreiben…",
-  "stat": "{{highlighted}} von {{total}} Episoden hervorgehoben"
+  "stat": "{{highlighted}} von {{total}} Episoden hervorgehoben",
+  "stat.withMoment": "{{count}} mit Schlüsselmoment",
+
+  "moment.label": "Schlüsselmoment (Sekunden in die Episode)",
+  "moment.jump": "▶ Springe zu {{time}}",
+  "moment.passed": "✓ gehört",
+
+  "spoiler.markLabel": "Als Spoiler markieren (verstecken, bis diese:r Besucher:in zu hören begonnen hat)",
+  "spoiler.hidden": "Spoilerschutz: Höre diese Episode an, um das Highlight anzuzeigen.",
+  "spoiler.reveal": "Trotzdem anzeigen",
+
+  "planned.badge": "Kommende Episode — noch keine Spoiler",
+
+  "filter.season": "Gefiltert nach Staffel {{season}}",
+
+  "browse.title": "Hervorgehobene Episoden durchsuchen",
+  "browse.back": "← Zurück zu allen Highlights",
+
+  "consent.summary": "Einwilligung: {{granted}}",
+  "consent.none": "keine erteilt",
+  "consent.analytics.granted": "Anonymer Seitenaufruf gezählt.",
+  "consent.analytics.request": "Analytics erlauben (zum Entscheiden klicken) — hilft der Show zu sehen, welche Highlights gelesen werden",
+  "consent.functional.alt": "Host-Badge",
+  "consent.functional.request": "Funktionale Cookies erlauben, um das Badge des Hosts hier anzuzeigen",
+  "consent.social.alt": "Share-Widget",
+  "consent.social.request": "Share-Widget erlauben, um es hier anzuzeigen",
+  "consent.necessary.alt": "Highlight-Plugin-Wortmarke (immer sichtbar, nicht an Einwilligung gebunden)",
+
+  "settings.title": "Website-Highlight-Einstellungen",
+  "settings.hint": "Gilt für jede Episoden-/Podcast-/Website-Highlight-Kachel der gesamten Seite.",
+  "settings.headingLabel": "Überschrift überschreiben (alle Bereiche)",
+  "settings.headingPlaceholder": "z. B. 🎙️ Producer's Pick",
+  "settings.fontLabel": "Highlight-Schriftart",
+  "settings.font.system": "System (Standard)",
+  "settings.font.serif": "Serif",
+  "settings.font.mono": "Monospace",
+  "settings.save": "Einstellungen speichern",
+  "settings.saved": "Gespeichert"
 }

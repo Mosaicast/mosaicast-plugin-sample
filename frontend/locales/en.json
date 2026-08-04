@@ -11,5 +11,42 @@
   "saving": "Saving…",
   "cancel": "Cancel",
   "markdownPlaceholder": "Write a highlight in markdown…",
-  "stat": "{{highlighted}} of {{total}} episodes highlighted"
+  "stat": "{{highlighted}} of {{total}} episodes highlighted",
+  "stat.withMoment": "{{count}} with a key moment",
+
+  "moment.label": "Key moment (seconds into the episode)",
+  "moment.jump": "▶ Jump to {{time}}",
+  "moment.passed": "✓ played",
+
+  "spoiler.markLabel": "Mark as spoiler (hide until this visitor has started listening)",
+  "spoiler.hidden": "Spoiler protection: start listening to this episode to reveal the highlight.",
+  "spoiler.reveal": "Show anyway",
+
+  "planned.badge": "Upcoming episode — no spoilers yet",
+
+  "filter.season": "Filtered to season {{season}}",
+
+  "browse.title": "Browse highlighted episodes",
+  "browse.back": "← Back to all highlights",
+
+  "consent.summary": "Consent: {{granted}}",
+  "consent.none": "none granted",
+  "consent.analytics.granted": "Anonymous view counted for this page.",
+  "consent.analytics.request": "Allow analytics (click to decide) — helps the show see which highlights get read",
+  "consent.functional.alt": "Host badge",
+  "consent.functional.request": "Allow functional cookies to show the host's badge here",
+  "consent.social.alt": "Share widget",
+  "consent.social.request": "Allow the share widget to be shown here",
+  "consent.necessary.alt": "Highlight plugin wordmark (always shown, not gated by consent)",
+
+  "settings.title": "Site Highlight Settings",
+  "settings.hint": "Applies to every Episode/Podcast/Site Highlight tile across the whole site.",
+  "settings.headingLabel": "Heading override (all scopes)",
+  "settings.headingPlaceholder": "e.g. 🎙️ Producer's Pick",
+  "settings.fontLabel": "Highlight font",
+  "settings.font.system": "System (default)",
+  "settings.font.serif": "Serif",
+  "settings.font.mono": "Monospace",
+  "settings.save": "Save settings",
+  "settings.saved": "Saved"
 }
