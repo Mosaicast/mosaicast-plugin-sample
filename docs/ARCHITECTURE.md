@@ -194,14 +194,16 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
     { "scope": "episode", "element": "bingo-host-board",   "placement": "admin",   "visibleTo": "podcaster" }
   ],
   "storage": "doc",
+  "data":    { "readableBy": "fan", "writableBy": "podcaster" },
   "config":  { "fuzzyThreshold": { "type": "number", "default": 0.85, "editableBy": "podcaster" } },
-  "consent": { "categories": [], "externalSources": [] }
+  "consent": { "services": [] }
 }
 ```
 - **`platformApi`**: which SDK contract version it was built against. The host **rejects incompatible plugins at startup** (stability anchor).
 - **`slots`**: scope + Web Component + `placement` (named region) + `visibleTo` (minimum role) + optional `order`.
 - **`storage`**: `"doc"` = generic JSONB store. For the wiki, a schema declaration instead (§7.6).
-- **`consent`**: categories + external sources (§12.4).
+- **`data`**: the access floor of the generic data surface (§7.6) — `readableBy` / `writableBy`, each `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`. **Declared, never derived:** the host does not infer it from slots. An absent block defaults `readableBy` to the *write* floor, not to anonymous — a **behaviour change**: a plugin that relied on an anonymous slot making its data anonymously readable must now declare `readableBy: "anonymous"` to keep it. A slot's `visibleTo` governs **rendering only**. Neither floor applies to the `USER` scope (§7.6).
+- **`consent`**: third-party services the plugin loads — one declaration each (`id`, `name`, `provider`, `category`, `privacyUrl`, `hosts`, `thirdCountryTransfer`, `storage[]`); the visitor decides per *category*, and `hosts` doubles as the CSP allow-list (§12.5). Omit the key entirely when the plugin loads nothing third-party.
 - **`config`**: declared fields are rendered by core as a **generic admin form** (respecting `editableBy`) — plugins never build their own config UI.
 
 ### 7.3 Slots & placements
@@ -222,8 +224,16 @@ public interface PluginContext {
 interface DocStore {
     <T> Optional<T> get(Scope scope, String key, Class<T> type);
     void            put(Scope scope, String key, Object value);
-    List<JsonNode>  query(Scope scope, String keyPrefix);
-}   // Scope = (SITE|FEED|SEASON|EPISODE, id)
+    boolean         delete(Scope scope, String key);          // idempotent
+    List<DocEntry>  query(Scope scope, String keyPrefix);     // keyed: (key, value)
+    List<OwnedDocEntry> queryAcrossUsers(String keyPrefix);   // backend-only, read-only, no HTTP surface
+}   // Scope = (SITE|FEED|SEASON|EPISODE|USER, id)
+    // USER is host-owned: its id is always the sentinel "me" and the host substitutes the authenticated
+    // caller. A plugin cannot name another user's partition, and an anonymous caller has none.
+    // A backend thread has no caller, so every DocStore method above throws UnsupportedOperationException
+    // for a USER scope — reads included. Aggregates go through queryAcrossUsers, which names each owner:
+record DocEntry(String key, JsonNode value) {}
+record OwnedDocEntry(UUID userId, String key, JsonNode value) {}   // userId is host-resolved, never client-supplied
 
 // Optional extension point (a plugin MAY implement it; wiki does in v1):
 interface ShareMetadataProvider {
@@ -257,8 +267,11 @@ interface PluginContext {
 ```
 **Important:** plugins *consume* filters, they don't *define* them. Filter axes (season, tags, sorting) belong to the host.
 
+**`ctx.scope` stays four-valued.** `USER` (§7.6) addresses storage, not a page — a slot is mounted into a named region of a view and there is no user view — so it appears in a `data/{scopeType}/{scopeId}/…` path and never in `ctx.scope`. A component reading per-user data addresses `data/user/me/…` explicitly while its `ctx.scope` remains whatever page it is on.
+
 ### 7.6 Generic store + schema provider
-- **Default store:** `plugin_data(plugin_id, scope_type, scope_id, key, value JSONB)` + GIN index. Scales comfortably to thousands in Postgres. Optional: a plugin declares **indexable fields** (expression index) as an escape hatch. Writes are **last-write-wins** — plugins needing stronger concurrency control model it in their data design (e.g. per-user keys, as bingo does).
+- **Access floor:** declared in the manifest (`"data"`, §7.2), never derived from slots. The `USER` scope is exempt from **both** floors — see below.
+- **Default store:** `plugin_data(plugin_id, scope_type, scope_id, key, value JSONB)` + GIN index. Scales comfortably to thousands in Postgres. Optional: a plugin declares **indexable fields** (expression index) as an escape hatch. Writes are **last-write-wins** — plugins needing stronger concurrency control model it in their data design. **Per-user data belongs in the `USER` scope, never in the key.** A key is client-supplied, so a convention like `mark:<userId>:cell` is an access-control decision the host cannot enforce: any caller above the plugin's read floor can address another user's key directly, and scope ids are public slugs, so nothing has to be guessed. The `USER` scope is addressed as `user/me` and resolved server-side from the session, so the partition a caller reaches is the only one they can name. **Neither floor applies to it.** `readableBy` does not, in either direction: no floor makes another user's partition readable, and none stands between a caller and their own. `writableBy` does not either — a write floor protects the *shared* surface, where one caller's write is visible to others and can overwrite theirs, and a `USER` partition is unshared by construction, so there is nobody to protect from it. Gating it would also re-create the coupling this rule exists to remove: a plugin needing a per-user feature would have to declare `writableBy: "fan"`, opening its *shared* scopes to fan writes — the same "one setting forced by an unrelated need" failure as the old minimum-across-slots read floor, moved to the write side. So any authenticated caller reads and writes their own `user/me` whatever the plugin declares; any other `user` id is a **400** (never a silent substitution) and an anonymous request a **401**, since there is no session to resolve. The partition is flat — one per user, not one per user *and* entity — so the entity goes in the key (`mark:<episodeSlug>:cell`). Aggregating across users is the backend's job via `queryAcrossUsers` (§7.4), not the client's: a summary each browser reports about itself is a summary of whatever users typed.
 - **Schema provider (for relational plugins like the wiki):** the manifest declares entities + indexed/FTS fields; the **platform** provisions dedicated, namespaced tables (`plugin_wiki_*`) via a **platform-managed migration runner** and cleans up on uninstall. (Implementation note: Flyway itself is static — dynamic per-plugin DDL is applied programmatically with the platform's own bookkeeping table; "never trust plugin DDL" still holds.) **The plugin never writes DDL.** Every plugin may use the mechanism; most declare nothing.
   ```json
   "storage": { "schema": { "page": {
