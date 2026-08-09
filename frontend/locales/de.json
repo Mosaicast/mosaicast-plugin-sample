@@ -10,9 +10,14 @@
   "save": "Speichern",
   "saving": "Speichert…",
   "cancel": "Abbrechen",
+  "remove": "Entfernen",
+  "remove.confirm": "Dieses Highlight dauerhaft entfernen?",
+  "remove.yes": "Ja, entfernen",
+  "removing": "Entfernt…",
   "markdownPlaceholder": "Highlight in Markdown schreiben…",
   "stat": "{{highlighted}} von {{total}} Episoden hervorgehoben",
   "stat.withMoment": "{{count}} mit Schlüsselmoment",
+  "stat.favourites": "· {{count}} Favorit(en) von Hörer:innen",
 
   "moment.label": "Schlüsselmoment (Sekunden in die Episode)",
   "moment.jump": "▶ Springe zu {{time}}",
@@ -23,6 +28,15 @@
   "spoiler.reveal": "Trotzdem anzeigen",
 
   "planned.badge": "Kommende Episode — noch keine Spoiler",
+
+  "fav.off": "☆ Zu Favoriten",
+  "fav.on": "★ Favorisiert",
+  "fav.count": "{{count}} Hörer:innen haben das favorisiert",
+  "fav.anonymous": "Melde dich an, um dieses Highlight zu favorisieren",
+
+  "card.label": "✨ Highlight",
+  "card.moment": "Schlüsselmoment bei {{time}}",
+  "card.spoiler": "Spoiler",
 
   "filter.season": "Gefiltert nach Staffel {{season}}",
 

@@ -1,4 +1,3 @@
-# Copy to: .github/workflows/license-header.yml  (in EVERY repo)
 # Checks that source files CHANGED IN THIS PR carry an SPDX-License-Identifier at the top.
 # (Changed-files-only, so a legacy violation elsewhere never blocks an unrelated PR.)
 # Merge blocker like DCO: set the "License Headers" check as required in branch protection.

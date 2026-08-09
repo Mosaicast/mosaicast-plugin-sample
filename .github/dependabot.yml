@@ -1,12 +1,13 @@
-# Adjust the directories once the build layout exists (e.g. /backend, /frontend).
+# Dependency updates. Each directory must point at the manifest itself — a gradle/npm ecosystem
+# pointed at `/` finds nothing in this repo, since the builds live in /backend and /frontend.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
   - package-ecosystem: gradle
-    directory: /
+    directory: /backend
     schedule: { interval: weekly }
   - package-ecosystem: npm
-    directory: /
+    directory: /frontend
     schedule: { interval: weekly }

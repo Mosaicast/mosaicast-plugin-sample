@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -9,19 +9,20 @@ import { makeI18n } from '../i18n';
 import { HighlightModal } from './HighlightModal';
 import { ConsentExtras } from './ConsentExtras';
 import { FONT_STACKS, SETTINGS_PATH, type SiteSettings } from './AdminSettings';
-
-interface HighlightDoc {
-  markdown: string;
-  /** Optional playback position (seconds) this highlight refers to; episode scope only — `ctx.player`. */
-  momentSeconds?: number;
-  /** Podcaster opt-in: hide this highlight behind a reveal gate until `ctx.progress` shows listening has started. */
-  spoiler?: boolean;
-}
+import {
+  favouriteCountPath,
+  favouriteDocPath,
+  formatTime,
+  highlightDocPath,
+  type FavouriteCount,
+  type HighlightDoc,
+} from '../highlight-doc';
 
 interface HighlightStats {
   totalEpisodes: number;
   highlightedEpisodes: number;
   episodesWithMoment: number;
+  totalFavourites: number;
 }
 
 /** The subpath prefix this plugin's deep links use under `/p/sample/` (ARCHITECTURE §6.4). */
@@ -30,14 +31,6 @@ const DEEP_LINK_PREFIX = 'highlight/';
 /** Renders markdown to sanitized HTML — never trust a podcaster-authored string verbatim (ARCHITECTURE §12.6). */
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
-}
-
-/** `90` -> `"1:30"`. Used for the `ctx.player` key-moment button and its "played" indicator. */
-function formatTime(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.round(totalSeconds));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return `${minutes}:${String(rest).padStart(2, '0')}`;
 }
 
 /**
@@ -54,6 +47,9 @@ function formatTime(totalSeconds: number): string {
  * - `route` — the site-scope element doubles as a shareable single-highlight page when `ctx.route.path`
  *   matches `highlight/<slug>`.
  * - `progress` — an opt-in (`highlight.spoiler`) reveal gate at episode scope.
+ * - the **`user` storage scope** (SDK 0.5.0) — a signed-in visitor's own "favourite" mark, written to
+ *   `data/user/me/fav:<episodeSlug>` and readable only by them. Its public tally comes back from a
+ *   *different* doc the backend computes with `queryAcrossUsers` — see {@link favouriteDocPath}.
  * - `episode.status` — an "upcoming episode" badge while `PLANNED`.
  * - `log` — sent on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, and every
  *   consent request/grant/deny (inside {@link ConsentExtras}) — real signal from real user actions, not
@@ -81,9 +77,11 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
     isSite && routePath.startsWith(DEEP_LINK_PREFIX) ? routePath.slice(DEEP_LINK_PREFIX.length) : '';
   const inDeepLink = deepLinkSlug !== '';
 
+  // highlightDocPath percent-encodes the id — required here because `deepLinkSlug` comes straight out of
+  // the visitor-controlled URL (see its doc comment).
   const dataPath = inDeepLink
-    ? `data/episode/${deepLinkSlug}/highlight`
-    : `data/${scopeType}/${ctx.scope.id}/highlight`;
+    ? highlightDocPath('episode', deepLinkSlug)
+    : highlightDocPath(scopeType, ctx.scope.id);
   const canEdit = !inDeepLink && (ctx.user?.role === 'podcaster' || ctx.user?.role === 'admin');
 
   // ctx.filter: read-only — plugins consume filter axes, never define them (ARCHITECTURE §6.1).
@@ -113,6 +111,8 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   const [draftMoment, setDraftMoment] = useState('');
   const [draftSpoiler, setDraftSpoiler] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
 
   const loadHighlight = useCallback(() => {
     ctx.api
@@ -151,26 +151,93 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   }, [ctx, isEpisode]);
   const spoilerHidden = isEpisode && highlight?.spoiler === true && !revealed;
 
+  // The `user` storage scope (SDK 0.5.0). Two docs, deliberately: `data/user/me/fav:<slug>` is this
+  // visitor's own mark — the host resolves `me` from the session, so the request cannot be aimed at
+  // anyone else — and `data/episode/<slug>/favourites` is the shared tally, which only the backend can
+  // produce (`queryAcrossUsers`). A browser summing other people's marks is not possible any more, and
+  // was never trustworthy: it would have been a count of whatever each client chose to report.
+  const [favourite, setFavourite] = useState(false);
+  const [favouriteCount, setFavouriteCount] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!isEpisode) return;
+    ctx.api
+      .get<FavouriteCount>(favouriteCountPath(ctx.scope.id))
+      .then((doc) => setFavouriteCount(doc?.count))
+      .catch(() => setFavouriteCount(undefined));
+  }, [ctx, isEpisode]);
+
+  useEffect(() => {
+    // An anonymous visitor has no partition at all — the host answers 401, so don't ask. This is the one
+    // place `ctx.user` gates a *request* rather than a control: `visibleTo`/`readableBy` govern the
+    // shared surface and say nothing about `user/me`, which needs a session and nothing else.
+    if (!isEpisode || !ctx.user) return;
+    ctx.api
+      .get<boolean>(favouriteDocPath(ctx.scope.id))
+      .then((mark) => setFavourite(mark === true))
+      .catch(() => setFavourite(false));
+  }, [ctx, isEpisode]);
+
+  /**
+   * Toggles this visitor's own mark: `put` to set it, `delete` to withdraw it.
+   *
+   * Optimistic, and the displayed tally deliberately does **not** move with it — that number is
+   * recomputed on the backend's schedule, and faking it here would show a count the server would
+   * contradict on the next load. The pressed state is this visitor's truth; the tally is everyone's.
+   */
+  async function toggleFavourite() {
+    const next = !favourite;
+    const path = favouriteDocPath(ctx.scope.id);
+    setFavourite(next);
+    try {
+      if (next) {
+        await ctx.api.put(path, true);
+      } else {
+        await ctx.api.delete(path);
+      }
+      ctx.log('info', `favourite ${next ? 'set' : 'cleared'} at ${path}`);
+    } catch (e) {
+      setFavourite(!next); // nothing awaits this handler, so a rollback + log is the error story
+      ctx.log('warn', `favourite toggle at ${path} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Modal keyboard/focus handling. Escape closes it, and closing hands focus back to the Edit button
+  // that opened it — without that, a keyboard or screen-reader user is dropped at the top of the
+  // document every time they cancel. The cleanup also covers unmount, where focusing a detached button
+  // is a harmless no-op.
+  const editButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!modalOpen) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') setModalOpen(false);
     }
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      editButtonRef.current?.focus();
+    };
   }, [modalOpen]);
+
+  // Stable callback ref, so it fires once when the textarea mounts rather than stealing focus back on
+  // every keystroke the way an inline `ref={(el) => el?.focus()}` would.
+  const focusOnMount = useCallback((el: HTMLTextAreaElement | null) => el?.focus(), []);
 
   function openEditor() {
     setDraft(highlight?.markdown ?? '');
     setDraftMoment(highlight?.momentSeconds != null ? String(highlight.momentSeconds) : '');
     setDraftSpoiler(highlight?.spoiler === true);
+    setConfirmingRemove(false);
     setModalOpen(true);
   }
 
   async function handleSave() {
     setSaving(true);
     try {
-      const momentSeconds = draftMoment.trim() === '' ? NaN : Number(draftMoment);
+      // `min={0}` on the input only guards typing — a pasted or autofilled negative still arrives here,
+      // and would make `player.seekTo()` jump to a negative offset. Clamp, matching formatTime's own floor.
+      const parsedMoment = draftMoment.trim() === '' ? NaN : Number(draftMoment);
+      const momentSeconds = Math.max(0, parsedMoment);
       const body: HighlightDoc = {
         markdown: draft,
         ...(Number.isFinite(momentSeconds) ? { momentSeconds } : {}),
@@ -186,6 +253,30 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       ctx.log('warn', `highlight save at ${dataPath} failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * `ctx.api.delete` — the fourth verb of the host's generic doc-store surface, and the counterpart of the
+   * backend's `DocStore.delete(scope, key)`. Removing the doc is genuinely different from saving an empty
+   * one: a doc with blank markdown still reads as "present" to `SitemapProvider`/`ShareMetadataProvider`,
+   * which is how contentless episodes used to end up in `sitemap.xml` with an empty OG description before
+   * this button existed. The backend's scheduled recompute prunes such leftovers; this removes them at the
+   * source. Idempotent server-side, so a double click is harmless.
+   */
+  async function handleRemove() {
+    setRemoving(true);
+    try {
+      await ctx.api.delete(dataPath);
+      setHighlight(undefined);
+      setModalOpen(false);
+      ctx.log('info', `highlight removed at ${dataPath}`);
+    } catch (e) {
+      // Same reasoning as handleSave: nothing awaits this handler, so logging is the error story. The
+      // modal stays open with the confirm step still showing, so the podcaster can retry or back out.
+      ctx.log('warn', `highlight removal at ${dataPath} failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -228,6 +319,11 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .spoiler p { margin: 0; font-style: italic; color: var(--mc-text-muted); }
         .moment { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
         .moment .passed { color: var(--mc-text-muted); }
+        .fav { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
+        .fav .favCount, .fav .favHint { color: var(--mc-text-muted); }
+        /* The pressed state uses accent-on-accent rather than a second literal colour — this is the one
+           control whose state is per-visitor, so it has to read as "on" at a glance in any host theme. */
+        button.favOn { background: var(--mc-accent-2); color: var(--mc-accent-contrast); }
         .browse { margin-top: 0.75rem; }
         .browse .browseTitle { margin: 0 0 0.25rem; font-size: 0.8rem; font-weight: 600; color: var(--mc-text); }
         .browse ul { margin: 0; padding-left: 1.1rem; }
@@ -258,7 +354,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       <div className="header">
         <span className="title">{heading}</span>
         {canEdit && (
-          <button type="button" onClick={openEditor}>
+          <button type="button" ref={editButtonRef} onClick={openEditor}>
             {i18n.t('edit')}
           </button>
         )}
@@ -302,6 +398,26 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         </div>
       )}
 
+      {isEpisode && !spoilerHidden && highlight?.markdown && (
+        <div className="fav">
+          {ctx.user ? (
+            <button
+              type="button"
+              className={favourite ? 'favOn' : 'secondary'}
+              aria-pressed={favourite}
+              onClick={toggleFavourite}
+            >
+              {favourite ? i18n.t('fav.on') : i18n.t('fav.off')}
+            </button>
+          ) : (
+            <span className="favHint">{i18n.t('fav.anonymous')}</span>
+          )}
+          {favouriteCount != null && favouriteCount > 0 && (
+            <span className="favCount">{i18n.t('fav.count', { count: favouriteCount })}</span>
+          )}
+        </div>
+      )}
+
       {(scopeType === 'feed' || (isSite && !inDeepLink)) && season != null && (
         <p className="filterNote">{i18n.t('filter.season', { season })}</p>
       )}
@@ -310,6 +426,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         <p className="stat">
           {i18n.t('stat', { highlighted: stats.highlightedEpisodes, total: stats.totalEpisodes })}
           {stats.episodesWithMoment > 0 && ` ${i18n.t('stat.withMoment', { count: stats.episodesWithMoment })}`}
+          {stats.totalFavourites > 0 && ` ${i18n.t('stat.favourites', { count: stats.totalFavourites })}`}
         </p>
       )}
 
@@ -319,7 +436,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           <ul>
             {ctx.episodes.map((slug) => (
               <li key={slug}>
-                <a href={`/p/sample/${DEEP_LINK_PREFIX}${slug}`}>{ctx.episodeLabels?.[slug] ?? slug}</a>
+                <a href={`/p/sample/${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`}>
+                  {ctx.episodeLabels?.[slug] ?? slug}
+                </a>
               </li>
             ))}
           </ul>
@@ -384,8 +503,20 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
             }
             .modal .actions {
               display: flex;
+              align-items: center;
               justify-content: flex-end;
               gap: 0.5rem;
+            }
+            .modal .actions .spacer { flex: 1; }
+            .modal .actions .confirm { flex: 1; font-size: 0.8rem; }
+            /* ThemeTokens has no danger colour (bg/surface/text/textMuted/accent/accentContrast/accent2/
+               border only), so this is the one literal in the component. Chosen to clear 4.5:1 on both a
+               light and a dark --mc-surface rather than tinting with the host's accent, which could be
+               red itself and make "Remove" indistinguishable from "Save". */
+            button.danger {
+              background: transparent;
+              color: #d33c3c;
+              border: 1px solid currentColor;
             }
             button {
               background: var(--mc-accent);
@@ -409,9 +540,12 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               if (e.target === e.currentTarget) setModalOpen(false);
             }}
           >
-            <div className="modal" role="dialog" aria-modal="true">
-              <h3>{i18n.t(`editTitle.${scopeType}`)}</h3>
+            {/* aria-labelledby gives the dialog an accessible name — a role="dialog" without one is
+                announced as just "dialog". The id is collision-free: this subtree is a shadow root. */}
+            <div className="modal" role="dialog" aria-modal="true" aria-labelledby="highlight-modal-title">
+              <h3 id="highlight-modal-title">{i18n.t(`editTitle.${scopeType}`)}</h3>
               <textarea
+                ref={focusOnMount}
                 value={draft}
                 placeholder={i18n.t('markdownPlaceholder')}
                 onChange={(e) => setDraft(e.target.value)}
@@ -437,13 +571,45 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                   </label>
                 </>
               )}
+              {/* Two-step confirm rather than a nested dialog: removal is destructive, but a second
+                  modal inside a portalled modal is more machinery than one irreversible click warrants. */}
               <div className="actions">
-                <button type="button" className="secondary" onClick={() => setModalOpen(false)} disabled={saving}>
-                  {i18n.t('cancel')}
-                </button>
-                <button type="button" onClick={handleSave} disabled={saving}>
-                  {saving ? i18n.t('saving') : i18n.t('save')}
-                </button>
+                {confirmingRemove ? (
+                  <>
+                    <span className="confirm">{i18n.t('remove.confirm')}</span>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => setConfirmingRemove(false)}
+                      disabled={removing}
+                    >
+                      {i18n.t('cancel')}
+                    </button>
+                    <button type="button" className="danger" onClick={handleRemove} disabled={removing}>
+                      {removing ? i18n.t('removing') : i18n.t('remove.yes')}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {highlight && (
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => setConfirmingRemove(true)}
+                        disabled={saving}
+                      >
+                        {i18n.t('remove')}
+                      </button>
+                    )}
+                    <span className="spacer" />
+                    <button type="button" className="secondary" onClick={() => setModalOpen(false)} disabled={saving}>
+                      {i18n.t('cancel')}
+                    </button>
+                    <button type="button" onClick={handleSave} disabled={saving}>
+                      {saving ? i18n.t('saving') : i18n.t('save')}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>

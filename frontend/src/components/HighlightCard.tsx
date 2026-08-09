@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Mosaicast Authors
+
+import { useEffect, useMemo, useState } from 'react';
+import type { PluginContext } from '@mosaicast/plugin-sdk';
+import { makeI18n } from '../i18n';
+import { formatTime, highlightDocPath, type HighlightDoc } from '../highlight-doc';
+
+/**
+ * The plugin's `episode`/`card` slot — the compact one-liner shown on an episode's **feed card**.
+ *
+ * <p>This is a second, deliberately minimal Web Component rather than a reuse of {@link Highlight}, which
+ * is the point of the `card` placement (ARCHITECTURE §7.3): a card is a dense list item repeated once per
+ * episode, so a plugin puts a badge there and keeps full rendering for the detail page's `main`. Three
+ * consequences a plugin author should copy:
+ *
+ * <ul>
+ *   <li><strong>It never renders the markdown body.</strong> Only a label, and the key moment if there is
+ *       one. That also means the `ctx.progress` spoiler gate {@link Highlight} implements is moot here —
+ *       there is no content to leak — so a spoiler-marked highlight is announced as such and nothing more.
+ *   <li><strong>It renders nothing at all when there is no highlight</strong> (`return null`), instead of
+ *       an empty-state line. A feed card belongs to the host, not the plugin; adding a permanent "no
+ *       highlight yet" row to every card in the list would be a poor guest.
+ *   <li><strong>It makes exactly one request.</strong> Unlike {@link Highlight} it deliberately does not
+ *       read the site-wide `settings` doc for the heading override — on a feed page this component mounts
+ *       once per episode, so a second fetch each would be N extra round trips for cosmetics.
+ * </ul>
+ */
+export function HighlightCard({ ctx }: { ctx: PluginContext }) {
+  const i18n = useMemo(() => makeI18n(ctx.locale), [ctx]);
+  const [locale, setLocale] = useState(ctx.locale.current());
+  useEffect(() => ctx.locale.onChange(setLocale), [ctx]);
+  useEffect(() => () => i18n.dispose(), [i18n]);
+  void locale; // re-render on locale change; i18n.t reads the current catalog internally
+
+  const [highlight, setHighlight] = useState<HighlightDoc | undefined>(undefined);
+  useEffect(() => {
+    ctx.api
+      .get<HighlightDoc>(highlightDocPath(ctx.scope.type, ctx.scope.id))
+      .then(setHighlight)
+      .catch(() => setHighlight(undefined));
+  }, [ctx]);
+
+  // A doc whose markdown is blank is contentless — the backend prunes those, but this must not badge an
+  // episode in the meantime (the same "present != publishable" rule SamplePlugin.publishableHighlight
+  // applies to sitemap.xml and the OpenGraph tags).
+  if (!highlight?.markdown?.trim()) return null;
+
+  return (
+    <span className="card">
+      <style>{`
+        .card {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.35rem;
+          font-size: 0.75rem;
+          color: var(--mc-text-muted);
+        }
+        .card .label { color: var(--mc-accent); font-weight: 600; }
+        .card .sep { opacity: 0.6; }
+      `}</style>
+      <span className="label">{i18n.t('card.label')}</span>
+      {highlight.spoiler === true ? (
+        <>
+          <span className="sep">·</span>
+          <span className="spoiler">{i18n.t('card.spoiler')}</span>
+        </>
+      ) : (
+        highlight.momentSeconds != null && (
+          <>
+            <span className="sep">·</span>
+            <span className="moment">{i18n.t('card.moment', { time: formatTime(highlight.momentSeconds) })}</span>
+          </>
+        )
+      )}
+    </span>
+  );
+}

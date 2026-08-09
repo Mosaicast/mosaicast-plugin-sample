@@ -10,9 +10,14 @@
   "save": "Save",
   "saving": "Saving…",
   "cancel": "Cancel",
+  "remove": "Remove",
+  "remove.confirm": "Remove this highlight permanently?",
+  "remove.yes": "Yes, remove",
+  "removing": "Removing…",
   "markdownPlaceholder": "Write a highlight in markdown…",
   "stat": "{{highlighted}} of {{total}} episodes highlighted",
   "stat.withMoment": "{{count}} with a key moment",
+  "stat.favourites": "· {{count}} favourite(s) from listeners",
 
   "moment.label": "Key moment (seconds into the episode)",
   "moment.jump": "▶ Jump to {{time}}",
@@ -23,6 +28,15 @@
   "spoiler.reveal": "Show anyway",
 
   "planned.badge": "Upcoming episode — no spoilers yet",
+
+  "fav.off": "☆ Favourite this",
+  "fav.on": "★ Favourited",
+  "fav.count": "{{count}} listener(s) favourited this",
+  "fav.anonymous": "Sign in to favourite this highlight",
+
+  "card.label": "✨ Highlight",
+  "card.moment": "key moment at {{time}}",
+  "card.spoiler": "spoiler",
 
   "filter.season": "Filtered to season {{season}}",
 

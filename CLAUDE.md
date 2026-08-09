@@ -14,13 +14,14 @@ Java 21 (Gradle, PF4J extension) · React + Vite (Web Component)
 ## Commands
 ```
 ./build.sh        # -> dist/
-cd backend && ./gradlew test  ;  cd ../frontend && npm test
+cd backend && ./gradlew test  ;  cd ../frontend && npm test && npm run typecheck
 ```
+Vite does not type-check — `npm run typecheck` (`tsc --noEmit`) is the only thing that does.
 
 ## Conventions (binding)
 - Java packages `dev.mosaicast.*`; npm scope `@mosaicast`.
 - Plugins import ONLY against the SDK, never against core code.
-- The manifest `platformApi` must match the built SDK version.
+- The manifest `platformApi` must match the built SDK version (**currently 0.6.0**) — core compares `major.minor` exactly and rejects a mismatch at load.
 - Never commit secrets; configure via `.env` / environment variables.
 - Migrations exclusively via Flyway.
 - **Tests are part of the work** (see DoD in the BRIEF, ARCHITECTURE §13.5; plugins test against the SDK test kit).
@@ -36,6 +37,8 @@ cd backend && ./gradlew test  ;  cd ../frontend && npm test
 - Identity (`EpisodeRef`) is separate from presentation (feed snapshot). Runtime/date in the core display come from the feed; plugin metrics are non-authoritative and live only in the plugin UI.
 - The host resolves scopes and decides access/filters — plugins only consume.
 - The generic doc store is the default; schema tables only platform-mediated (declarative).
+- Per-user data belongs in the host-owned `USER` scope (`data/user/me/…`, `Scope.user()`), **never in a doc key** — a key is client input. Aggregate it only on the backend via `DocStore.queryAcrossUsers(prefix)`.
+- The manifest declares its own data access floor (`"data": { readableBy, writableBy }`); a slot's `visibleTo` governs rendering only. Neither floor applies to the `USER` scope.
 
 ## Keep docs current (continuously)
 - Keep **README.md** and **this CLAUDE.md** up to date (commands, structure, setup, conventions) — repo-local, your job.

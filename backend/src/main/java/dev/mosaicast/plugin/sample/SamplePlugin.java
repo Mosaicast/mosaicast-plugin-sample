@@ -6,6 +6,7 @@ package dev.mosaicast.plugin.sample;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.OgMeta;
+import dev.mosaicast.plugin.api.OwnedDocEntry;
 import dev.mosaicast.plugin.api.PluginBackend;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.Scope;
@@ -13,9 +14,12 @@ import dev.mosaicast.plugin.api.ShareMetadataProvider;
 import dev.mosaicast.plugin.api.SitemapProvider;
 import dev.mosaicast.plugin.api.SitemapUrl;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import org.pf4j.Extension;
 import tools.jackson.databind.JsonNode;
 
@@ -27,10 +31,29 @@ import tools.jackson.databind.JsonNode;
  * doc-store HTTP surface — this class never sees an individual read/write. Its jobs are the things that
  * surface cannot do:
  * <ul>
+ *   <li><strong>Own the keys it computes</strong> (SDK 0.6.0): {@code stats} and {@code favourites} below are
+ *       written by this class and by nothing else, so {@code plugin.json} lists them in
+ *       {@code data.backendOwned}. Without that declaration a shared-scope document has no owner at all —
+ *       authorization on the host's data surface is per <em>plugin</em>, not per document, so any caller
+ *       above the manifest's {@code writableBy} floor could {@code PUT} a forged {@code stats} over HTTP and
+ *       have it served to every visitor. The floors were never wrong; there was simply no way to say "this
+ *       key is the backend's". {@link PluginContext#store()} is unaffected — the backend keeps writing, which
+ *       is the point. The client-written keys ({@code highlight}, {@code settings}, and every {@code fav:}
+ *       mark) are deliberately <em>not</em> declared.
  *   <li><strong>Aggregate</strong> across scopes: {@link #register(PluginContext)} schedules a recurring
  *       recount of how many site episodes currently have a highlight, using {@link PluginContext#feeds()}
  *       + {@link PluginContext#store()}, storing the result at {@code Scope.site()}/{@code "stats"} for
- *       the site-scope Web Component to display.
+ *       the site-scope Web Component to display. The same pass <strong>prunes</strong> contentless
+ *       highlight docs via {@link dev.mosaicast.plugin.api.DocStore#delete(Scope, String)} — the one
+ *       housekeeping job no per-request code path can do.
+ *   <li><strong>Aggregate across users</strong> (SDK 0.5.0): the same pass tallies every visitor's
+ *       {@code fav:<episodeSlug>} mark out of their own {@link dev.mosaicast.plugin.api.ScopeType#USER}
+ *       partition via {@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} and publishes a
+ *       per-episode count to an episode scope the frontend may read. This is the only way that number can
+ *       be assembled at all — per-user documents live at {@code data/user/me/…}, which resolves to the
+ *       <em>caller's</em> partition, so no browser can count anybody but itself. It is also the only way
+ *       the number is <em>true</em>: the owner id on each {@link dev.mosaicast.plugin.api.OwnedDocEntry}
+ *       is host-resolved from the partition the document sits in, never a value a client supplied.
  *   <li><strong>Serve deep links</strong> ({@code /p/sample/highlight/<episodeSlug>}, ARCHITECTURE §6.4):
  *       this class also implements the two optional extension points a plugin may add on top of {@link
  *       PluginBackend} — {@link ShareMetadataProvider} (OpenGraph tags for link scrapers) and {@link
@@ -49,7 +72,10 @@ import tools.jackson.databind.JsonNode;
  * this plugin's classloader, not to any one instance — is shared correctly across all of PF4J's
  * instances of it. Hence {@link #ctx} below is {@code static}, not a plain field; see
  * {@code SamplePluginTest} for a regression test that instantiates a fresh {@code SamplePlugin} per method
- * call, exactly like PF4J does, which a same-instance test could never have caught.
+ * call, exactly like PF4J does, which a same-instance test could never have caught. {@link #metaFor(String)}
+ * and {@link #urls()} additionally treat a still-null {@link #ctx} as "nothing to contribute" rather than
+ * dereferencing it: core looks extension points up independently of {@code register()}, so a lookup that
+ * happens first must degrade to no OG tags / no sitemap entries, not throw.
  *
  * <p><strong>{@link PluginContext#schema()} is intentionally never called here.</strong> {@code
  * plugin.json} declares {@code "storage": "doc"}, and core's own 0.4.0 plan keeps {@code schema()}
@@ -67,15 +93,53 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     /** The deep-link subpath prefix this plugin serves: {@code /p/sample/highlight/<episodeSlug>}. */
     private static final String HIGHLIGHT_SUBPATH_PREFIX = "highlight/";
 
+    /**
+     * Key prefix of a visitor's own "I liked this highlight" mark, written by the frontend to
+     * {@code data/user/me/fav:<episodeSlug>}.
+     *
+     * <p>The episode is in the <em>key</em> and not in the scope because a {@code USER} partition is flat
+     * — one per user, not one per user and episode. Note the direction: pre-0.5.0 the advice was the exact
+     * opposite (an entity scope with the <em>user</em> in the key), which is what made per-user data
+     * addressable, and forgeable, by any other caller.
+     */
+    private static final String FAVOURITE_KEY_PREFIX = "fav:";
+
+    /** Doc key holding {@link FavouriteCount} at an episode scope. */
+    private static final String FAVOURITE_COUNT_KEY = "favourites";
+
     /** Longest excerpt of a highlight's markdown carried into {@link OgMeta#description()}. */
     private static final int DESCRIPTION_EXCERPT_LENGTH = 160;
+
+    /** Markdown punctuation dropped by {@link #excerpt(String)}; precompiled — {@code urls()} runs per request. */
+    private static final Pattern MARKDOWN_TOKENS = Pattern.compile("[#*_`\\[\\]()]");
+
+    /** Collapses newlines/indentation into single spaces for a one-line OG description. */
+    private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
 
     /** Mirrors the frontend's stored highlight shape ({@code { markdown: string } }) at every scope. */
     record Highlight(String markdown) {
     }
 
-    /** Mirrors the frontend's {@code stats} doc shape, read at {@code data/site/main/stats}. */
-    record HighlightStats(int totalEpisodes, int highlightedEpisodes, int episodesWithMoment) {
+    /**
+     * Mirrors the frontend's {@code stats} doc shape, read at {@code data/site/main/stats}.
+     *
+     * <p>Written here only, and declared {@code data.backendOwned} so the host refuses a client write to it —
+     * the forged {@code PUT} in the SDK's 0.6.0 migration guide is a forged {@code stats} on this plugin.
+     */
+    record HighlightStats(int totalEpisodes, int highlightedEpisodes, int episodesWithMoment, int totalFavourites) {
+    }
+
+    /**
+     * How many distinct visitors have favourited an episode's highlight, published to
+     * {@code data/episode/<slug>/favourites}.
+     *
+     * <p>A shared doc that is read-only over HTTP and derived from data the frontend cannot read: the marks
+     * it counts are unreachable from any browser but their owner's, and {@code favourites} is declared
+     * {@code data.backendOwned} (SDK 0.6.0), so a {@code PUT}/{@code DELETE} from any client is a 403 no
+     * matter what role it holds. The {@code writableBy: podcaster} floor alone would not have been enough —
+     * it would have let a podcaster publish any number they liked.
+     */
+    record FavouriteCount(int count) {
     }
 
     /**
@@ -85,6 +149,16 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * javadoc for why an instance field silently doesn't work here.
      */
     private static volatile PluginContext ctx;
+
+    /**
+     * Test seam: clears the classloader-scoped context. Only tests need this — at runtime the field is
+     * written once by {@link #register(PluginContext)} and lives as long as the plugin's classloader.
+     * Because the field is {@code static}, leaving it set would leak between test methods and let a test
+     * that forgot to {@code register()} silently pass on a previous test's context.
+     */
+    static void clearContextForTests() {
+        ctx = null;
+    }
 
     @Override
     public void register(PluginContext ctx) {
@@ -100,14 +174,23 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         Duration interval = Duration.ofMinutes(Math.max(1, minutes));
 
         ctx.logger().info("registered; recomputing highlight stats every {}", interval);
+        // Recompute once now, then on the schedule. The eager pass is not just for freshness: `stats` and
+        // `favourites` are declared `data.backendOwned` (SDK 0.6.0), which refuses *new* client writes but
+        // does not remove a document forged before the declaration existed. A backend that only wrote on
+        // its schedule would keep serving that forgery until the next tick — up to refreshIntervalMinutes.
+        recomputeHighlightStats(ctx);
         ctx.onSchedule(interval, () -> recomputeHighlightStats(ctx));
     }
 
     private static void recomputeHighlightStats(PluginContext ctx) {
         List<String> episodeIds = ctx.feeds().episodesIn(Scope.site());
+        Map<String, Integer> favourites = tallyFavourites(ctx);
         int highlighted = 0;
         int withMoment = 0;
+        int pruned = 0;
+        int totalFavourites = 0;
         for (String id : episodeIds) {
+            totalFavourites += publishFavouriteCount(ctx, id, favourites.getOrDefault(id, 0));
             // A "highlight" doc key is unique per episode scope, so this keyPrefix scan returns at most
             // one entry — used anyway (instead of store().get(..., Highlight.class)) to demonstrate the
             // Jackson-3 JsonNode path a real prefix scan hands back (see DocEntry's javadoc), and to read
@@ -118,7 +201,20 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 JsonNode node = entry.value();
                 JsonNode markdown = node.path("markdown");
                 if (!markdown.isString() || markdown.stringValue().isBlank()) {
-                    ctx.logger().warn("episode {} has a highlight doc with a missing/blank 'markdown' field; skipping it", id);
+                    // A contentless highlight doc is junk: it is what an older version of this plugin left
+                    // behind when a podcaster "removed" a highlight by blanking the textarea (there was no
+                    // Remove button before 2.5.0). Left in place it warns on every recompute forever, and —
+                    // worse — still counts as present for urls()/metaFor(), putting the episode in
+                    // sitemap.xml with an empty OpenGraph description. So prune it rather than skip it.
+                    // delete() is idempotent and reports whether anything was actually removed; a false
+                    // here means a concurrent writer got there first, which is not an error.
+                    boolean removed = ctx.store().delete(Scope.episode(id), entry.key());
+                    if (removed) {
+                        pruned++;
+                    }
+                    ctx.logger().warn(
+                            "episode {} had a highlight doc with a missing/blank 'markdown' field; pruned it (removed={})",
+                            id, removed);
                     continue;
                 }
                 highlighted++;
@@ -127,21 +223,86 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 }
             }
         }
-        ctx.logger().info("recomputed highlight stats: {}/{} episodes highlighted ({} with a key moment)",
-                highlighted, episodeIds.size(), withMoment);
-        ctx.store().put(Scope.site(), "stats", new HighlightStats(episodeIds.size(), highlighted, withMoment));
+        ctx.logger().info(
+                "recomputed highlight stats: {}/{} episodes highlighted ({} with a key moment, {} empty doc(s) pruned,"
+                        + " {} favourite(s) across all visitors)",
+                highlighted, episodeIds.size(), withMoment, pruned, totalFavourites);
+        ctx.store().put(Scope.site(), "stats", new HighlightStats(episodeIds.size(), highlighted, withMoment, totalFavourites));
+    }
+
+    /**
+     * Counts every visitor's {@code fav:<episodeSlug>} mark, keyed by episode slug.
+     *
+     * <p>{@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} is the backend's <em>only</em>
+     * window onto {@code USER} partitions: {@code store().get(Scope.user(), …)} and friends throw
+     * {@link UnsupportedOperationException}, because a scheduled task has no calling user and resolving
+     * {@code "me"} without one would have to pick somebody. There is no HTTP surface for this method
+     * either, so a visitor's request cannot reach another visitor's marks through it.
+     *
+     * <p>Each entry's {@link dev.mosaicast.plugin.api.OwnedDocEntry#userId() userId} is ignored here — one
+     * mark per user per episode already, so the count <em>is</em> the number of distinct visitors. A
+     * plugin that stored several docs per user would deduplicate on it; it is also what a moderation view
+     * would key on, and it is host-resolved, so it can be trusted for that.
+     */
+    private static Map<String, Integer> tallyFavourites(PluginContext ctx) {
+        Map<String, Integer> byEpisode = new HashMap<>();
+        for (OwnedDocEntry entry : ctx.store().queryAcrossUsers(FAVOURITE_KEY_PREFIX)) {
+            // An explicit `false` means "unfavourited but written, not deleted" — an older client, or a
+            // failed delete. Counting mere presence would report a favourite the visitor removed.
+            if (entry.value().isBoolean() && !entry.value().booleanValue()) {
+                continue;
+            }
+            String slug = entry.key().substring(FAVOURITE_KEY_PREFIX.length());
+            if (!slug.isBlank()) {
+                byEpisode.merge(slug, 1, Integer::sum);
+            }
+        }
+        return byEpisode;
+    }
+
+    /**
+     * Publishes (or clears) an episode's favourite count and returns it.
+     *
+     * <p>Zero is written as a <em>deletion</em>, not as {@code {"count": 0}}: an episode nobody has
+     * favourited yet and one whose last favourite was withdrawn are the same state, and the frontend
+     * already renders a missing doc as "no favourites". Leaving a zero doc behind would also keep it alive
+     * for episodes that have long since dropped out of the feed.
+     */
+    private static int publishFavouriteCount(PluginContext ctx, String episodeId, int count) {
+        if (count == 0) {
+            ctx.store().delete(Scope.episode(episodeId), FAVOURITE_COUNT_KEY);
+        } else {
+            ctx.store().put(Scope.episode(episodeId), FAVOURITE_COUNT_KEY, new FavouriteCount(count));
+        }
+        return count;
+    }
+
+    /**
+     * The highlight for {@code slug}, but only if it actually carries content.
+     *
+     * <p>{@code metaFor}/{@code urls} both need this rather than a bare {@code store().get(...)}: a
+     * highlight doc with blank markdown is present but has nothing to show, and treating "present" as
+     * "publishable" is what put contentless episodes into {@code sitemap.xml} with an empty OpenGraph
+     * description. {@link #recomputeHighlightStats(PluginContext)} prunes such docs, but only on its
+     * schedule — these two run per request and must not depend on that having happened yet.
+     */
+    private static Optional<Highlight> publishableHighlight(PluginContext ctx, String slug) {
+        return ctx.store()
+                .get(Scope.episode(slug), "highlight", Highlight.class)
+                .filter(highlight -> highlight.markdown() != null && !highlight.markdown().isBlank());
     }
 
     @Override
     public Optional<OgMeta> metaFor(String subpath) {
-        if (subpath == null || !subpath.startsWith(HIGHLIGHT_SUBPATH_PREFIX)) {
+        PluginContext ctx = SamplePlugin.ctx;
+        if (ctx == null || subpath == null || !subpath.startsWith(HIGHLIGHT_SUBPATH_PREFIX)) {
             return Optional.empty();
         }
         String slug = subpath.substring(HIGHLIGHT_SUBPATH_PREFIX.length());
         if (slug.isBlank()) {
             return Optional.empty();
         }
-        return ctx.store().get(Scope.episode(slug), "highlight", Highlight.class).map(highlight -> {
+        return publishableHighlight(ctx, slug).map(highlight -> {
             DisplaySnapshot snapshot = ctx.feeds().display(slug);
             return new OgMeta(snapshot.title(), excerpt(highlight.markdown()), snapshot.artwork());
         });
@@ -149,15 +310,19 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
 
     @Override
     public List<SitemapUrl> urls() {
+        PluginContext ctx = SamplePlugin.ctx;
+        if (ctx == null) {
+            return List.of();
+        }
         return ctx.feeds().episodesIn(Scope.site()).stream()
-                .filter(slug -> ctx.store().get(Scope.episode(slug), "highlight", Highlight.class).isPresent())
+                .filter(slug -> publishableHighlight(ctx, slug).isPresent())
                 .map(slug -> new SitemapUrl("/p/sample/" + HIGHLIGHT_SUBPATH_PREFIX + slug, null))
                 .toList();
     }
 
     /** Strips the most common markdown tokens and collapses whitespace, for a plain-text OG description. */
     private static String excerpt(String markdown) {
-        String plain = markdown.replaceAll("[#*_`\\[\\]()]", "").replaceAll("\\s+", " ").trim();
+        String plain = WHITESPACE_RUN.matcher(MARKDOWN_TOKENS.matcher(markdown).replaceAll("")).replaceAll(" ").trim();
         return plain.length() <= DESCRIPTION_EXCERPT_LENGTH ? plain : plain.substring(0, DESCRIPTION_EXCERPT_LENGTH).trim() + "…";
     }
 }
