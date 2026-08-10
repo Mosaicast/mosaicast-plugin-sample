@@ -16,3 +16,6 @@ dist/
 *.iml
 .vscode/
 .DS_Store
+
+# Browser-automation scratch output (Playwright MCP snapshots/console logs)
+.playwright-mcp/

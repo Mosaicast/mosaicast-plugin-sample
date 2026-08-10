@@ -1,10 +1,12 @@
-# Copy to: .github/workflows/ci.yml
-# Builds and tests the backend (Gradle/Java) and frontend (Vite/Vitest) on every PR.
+# Builds and tests the backend (Gradle/Java) and frontend (Vite/Vitest) on every PR and on master,
+# then proves the repo's actual deliverable — `./build.sh` producing a complete `dist/` — still works.
 name: CI
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  push:
+    branches: [master]
 
 jobs:
   backend:
@@ -17,6 +19,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
 
       - name: Build and test
         working-directory: backend
@@ -37,9 +40,66 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install, build and test
+      - name: Install
         working-directory: frontend
+        run: npm ci
+
+      # Vite transpiles without type-checking, so `npm run build` alone would happily ship a type
+      # error. tsconfig.json is `noEmit: true` precisely so this step is the one that enforces it.
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Test
+        working-directory: frontend
+        run: npm test
+
+  package:
+    name: Package (build.sh -> dist/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5.6.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # This repo is a copy template for plugin authors, so the drop-in `dist/` layout build.sh
+      # writes is the deliverable — the two jobs above would stay green even if build.sh broke.
+      - name: Run build.sh
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build.sh
+
+      - name: Verify dist/ layout
         run: |
-          npm ci
-          npm run build
-          npm test
+          set -euo pipefail
+          for f in dist/plugin.json dist/sample.jar dist/assets/sample.es.js; do
+            [ -s "$f" ] || { echo "::error::missing or empty $f"; exit 1; }
+          done
+          # The manifest's platformApi must match the SDK the backend actually compiled against.
+          manifest_api=$(grep -o '"platformApi": *"[^"]*"' dist/plugin.json | cut -d'"' -f4)
+          gradle_api=$(grep -o 'plugin-api:[0-9][^"]*' backend/build.gradle.kts | cut -d: -f2)
+          [ "$manifest_api" = "$gradle_api" ] || {
+            echo "::error::plugin.json platformApi=$manifest_api but backend builds against plugin-api:$gradle_api"
+            exit 1
+          }
+          echo "dist/ complete, platformApi=$manifest_api ✅"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-dist
+          path: dist/

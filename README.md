@@ -18,7 +18,13 @@ every feature against the now-complete host — consent, the generic config-admi
 links/share-metadata/sitemap all merged to `master` since 2.1.0. **2.3.0** moves the plugin onto **SDK
 0.4.0**, landing in parallel with core's own 0.4.0 migration: service-level consent (`request()`/
 `granted()`/a real `onChange`), backend `ctx.logger()`/frontend `ctx.log()`, and the Jackson-3-shaped
-`DocEntry.value()` are all now exercised — see [Changelog](#changelog).
+`DocEntry.value()` are all now exercised — see [Changelog](#changelog). **2.6.0** moves it onto **SDK
+0.5.0**: the manifest declares its own [`data` access floor](#the-manifest-data-access-floor-sdk-050),
+and a per-visitor "favourite" feature demonstrates the release's headline contract — the host-owned
+[`user` storage scope](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050) plus the backend-only
+`queryAcrossUsers` rollup that is the only honest way to count it. **2.7.0** moves it onto **SDK 0.6.0**,
+which closes the other half of that ownership story: the two keys this plugin's backend computes are now
+declared [`data.backendOwned`](#backend-owned-keys-sdk-060), so a client can no longer forge them.
 
 ## What's demonstrated, and where
 
@@ -28,8 +34,9 @@ links/share-metadata/sitemap all merged to `master` since 2.1.0. **2.3.0** moves
 | `scope` | Addresses the doc store (`data/{scopeType}/{scopeId}/highlight`) and picks the i18n title. |
 | `episodes` / `episodeLabels` | Site scope renders a "browse highlighted episodes" index, linking each episode's public slug to its own deep link. |
 | `episode?.status` | An "Upcoming episode — no spoilers yet" badge while `PLANNED`. |
-| `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). |
-| `api` | Every read/write — the highlight doc, the backend-computed stats doc, the site-wide settings doc, and (read-only) another episode's highlight in the deep-link view. |
+| `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). Also decides whether the favourite toggle is offered at all: an anonymous visitor has no `user` partition, so the component shows a sign-in hint instead of making a request the host would answer with 401. |
+| **the `user` storage scope** | New in 2.6.0 — a signed-in visitor's own "★ Favourited" mark at `data/user/me/fav:<episodeSlug>`, written with `ctx.api.put`/withdrawn with `ctx.api.delete`. `user` is a `DataScopeType`, **not** a slot scope: `ctx.scope` stays `episode`, only the storage address changes. The public tally beside it comes from a *different*, backend-written doc — see [below](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050). |
+| `api` | All four verbs of the host's generic doc-store surface: `get` (the highlight doc, the backend-computed stats doc, the site-wide settings doc, and read-only another episode's highlight in the deep-link view), `put` (save), and `delete` (the edit modal's **Remove**, behind a two-step confirm). |
 | `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
 | `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
 | `player` | An optional per-highlight "key moment" (seconds): a "▶ Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "✓ played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
@@ -41,15 +48,52 @@ links/share-metadata/sitemap all merged to `master` since 2.1.0. **2.3.0** moves
 
 The **site/sidebar, `visibleTo: "podcaster"`** slot (`sample-highlight-settings`, `components/AdminSettings.tsx`)
 is a second Web Component with its own `ctx` — see "Two ways to be configurable" below for why it exists.
+The **episode/card** slot (`sample-highlight-card`, `components/HighlightCard.tsx`) is a third — see
+"The `card` placement" below.
+
+## The `card` placement — a second, deliberately smaller element
+`card` is the compact region on an episode's **feed card**, and it is the one placement with a design rule
+attached (ARCHITECTURE §7.3): a plugin puts a badge there and keeps full rendering for the detail page's
+`main`. This plugin therefore ships `sample-highlight-card` as a *separate* Web Component rather than
+reusing `sample-highlight`, and the differences are the whole lesson:
+
+- **It never renders the markdown body** — only a `✨ Highlight` label plus the key moment if there is one.
+  A side effect worth noticing: because there is no content on a card, the `ctx.progress` spoiler gate
+  `Highlight` implements is moot here, so a spoiler-marked highlight is announced as `✨ Highlight ·
+  spoiler` and nothing else leaks.
+- **It renders nothing at all when there is no highlight** (`return null`), not an empty-state line. A feed
+  card belongs to the host; adding a permanent "no highlight yet" row to every card in a list is a poor guest.
+- **It makes exactly one request.** It deliberately skips the site-wide `settings` doc that `Highlight`
+  reads for the heading override, because on a feed page this element mounts *once per episode* — a second
+  fetch each would be N extra round trips for cosmetics. Asserted in `HighlightCard.test.tsx`.
+
+Declaring `card` is optional: declare it or omit it, but don't put the full rendering in both.
+
+## Removing a highlight — the fourth doc-store verb
+The edit modal's **Remove** button is this repo's example of `ctx.api.delete` and its backend counterpart
+`DocStore.delete(scope, key) → boolean`. It exists because *deleting the doc is not the same as saving an
+empty one*: a doc with blank markdown is still **present**, and "present" is what `SitemapProvider`/
+`ShareMetadataProvider` used to test for — so blanking a highlight left the episode in `sitemap.xml` with an
+empty OpenGraph description, and made `recomputeHighlightStats` log a warning about it on every run forever.
+
+Both ends are now correct, and the split between them is the point:
+- **Per request**, `metaFor`/`urls` go through `SamplePlugin.publishableHighlight`, which treats a
+  blank-markdown doc as absent. They cannot wait for a scheduled job to have run.
+- **On the schedule**, `recomputeHighlightStats` *prunes* those docs with `store().delete(...)`, cleaning up
+  what older versions of this plugin left behind. `delete` is idempotent and returns whether anything was
+  actually removed, so a second pass finds nothing and stays quiet — asserted in `SamplePluginTest`.
+
+The UI uses a **two-step inline confirm** rather than a nested dialog: removal is irreversible, but a second
+modal inside an already-portalled modal is more machinery than one destructive click warrants.
 
 ### Backend `PluginContext` (ARCHITECTURE §7.4) — `backend/.../SamplePlugin.java`
 | Member | What this plugin does with it |
 |---|---|
-| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). |
+| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
 | `schema()` | Not used — `plugin.json` declares `"storage": "doc"`, so this is always `null`. Core's own 0.4.0 plan keeps `schema()` returning `null` regardless of what a manifest declares ("deferred — schema() keeps returning null, which 0.4.0 explicitly allows"), so there's nothing to wire up yet even though the SDK's `SchemaStore`/`Criteria` query surface is real as of 0.4.0. |
 | `config()` | `refreshIntervalMinutes` — read and passed to `onSchedule`. Genuinely admin/podcaster-editable today via core's generic config-admin form (`PUT /api/admin/plugins/sample/config`) — see "Two ways to be configurable" below. |
 | `feeds()` | `episodesIn(Scope.site())` for the stats aggregate and the sitemap; `display(refId)` for the deep link's OG title/artwork. |
-| `onSchedule` | Recomputes the highlighted-episode count (and how many have a key moment) every `refreshIntervalMinutes`. |
+| `onSchedule` | Recomputes the highlighted-episode count (and how many have a key moment), prunes contentless docs, and rolls up per-visitor favourites, every `refreshIntervalMinutes`. |
 | `logger()` | New in 0.4.0 — an SLF4J `Logger` named `plugin.sample` by the host. `WARN` on a non-positive `refreshIntervalMinutes` (clamped, not trusted) and on a stored highlight doc with a missing/blank `markdown` field (skipped, not crashed on); `INFO` on registration and on every recompute, with the counts. |
 
 `SamplePlugin` also implements the two **optional** backend extension points a plugin may add alongside
@@ -61,6 +105,121 @@ is a second Web Component with its own `ctx` — see "Two ways to be configurabl
 Both are unit-tested directly in `SamplePluginTest`, and now genuinely exercised end-to-end by core (see
 "Deep links need a `page` slot" below) — `/p/sample/highlight/<slug>` really answers with `metaFor`'s
 OpenGraph tags, and `/sitemap.xml` really carries `urls()`'s entries, both confirmed against a running core.
+
+## Per-user data lives in a scope, not in a key (SDK 0.5.0)
+The favourite toggle under an episode highlight is small on purpose — it exists to show the shape of the
+contract that replaced the SDK's own earlier advice.
+
+**What it used to say.** Model per-user data as a per-user *key*: `mark:<userId>:cell` under an episode
+scope. A key is client input, so that put an access-control decision exactly where the host could not check
+it — and scope ids are public slugs, so any caller past the plugin's read floor could address anybody's key
+without guessing anything. A white-box audit of core found it; 0.5.0 is the fix.
+
+**What it says now.** The host owns the scope:
+
+```ts
+// frontend — the visitor's own mark. `me` is a sentinel the host resolves from the session;
+// any other user id is a 400, and an anonymous request a 401.
+await ctx.api.put(`data/user/${SELF_SCOPE_ID}/fav:${ctx.scope.id}`, true);
+await ctx.api.delete(`data/user/${SELF_SCOPE_ID}/fav:${ctx.scope.id}`);   // withdraw
+```
+
+The partition is **flat** — one per user, not one per user *and* episode — so the episode moves into the
+key. That is the exact inverse of the old convention, and it is the whole point: the part a client controls
+(the key) now names a thing, and the part the host controls (the scope) names a person.
+
+**Counting it is the backend's job.** Per-user docs are not addressable from another browser, by design, so
+a tally cannot be assembled client-side any more. It never should have been: a summary each browser reports
+about itself is a summary of whatever its user typed. `SamplePlugin.tallyFavourites` uses the 0.5.0
+backend-only read instead, and publishes the result where the frontend can read it:
+
+```java
+for (OwnedDocEntry entry : ctx.store().queryAcrossUsers("fav:")) { … }   // userId is host-resolved
+ctx.store().put(Scope.episode(slug), "favourites", new FavouriteCount(n));
+```
+
+Two consequences worth copying:
+- **A backend has no calling user**, so *every* `DocStore` method — reads included — throws
+  `UnsupportedOperationException` for a `USER` scope. `queryAcrossUsers` is the only door, and it has no
+  HTTP surface, so no visitor's request can reach another visitor's data through it.
+- **Zero is a deletion, not a `{"count": 0}`**: an episode nobody favourited and one whose last favourite
+  was withdrawn are the same state. `SamplePluginTest` asserts both directions, seeding what a frontend
+  would have written via the test kit's `InMemoryDocStore.asUser(uuid)` — which has no production
+  counterpart, precisely because no real store can write into someone else's partition.
+
+**Migrating an existing plugin?** This one had no per-user data to move, so it is a clean example, not a
+migration example. If yours does, note that nothing moves it for you and the backend cannot write into a
+partition: the move is necessarily client-side and lazy (each user's data moves on their next visit). The
+SDK's `MIGRATION.md` step 4 has the pattern.
+
+## The manifest `data` access floor (SDK 0.5.0)
+```json
+"storage": "doc",
+"data": {
+  "readableBy": "anonymous",
+  "writableBy": "podcaster",
+  "backendOwned": ["stats", "favourites"]
+},
+```
+Before 0.5.0 core *derived* the read floor from the **minimum `visibleTo` across all slots** — so this
+plugin, which has anonymous display slots and a podcaster-only settings slot, served its entire doc store
+to anonymous callers. That inference is gone and nothing replaces it silently: **an absent `data` block
+defaults `readableBy` to the write floor, not to anonymous.** A plugin with a public slot and no block
+therefore starts answering **403** to reads that returned 200 the day before. That is the fix working, but
+it is the change most likely to be met in production, so declare the block.
+
+This plugin's own floors say something worth reading twice:
+- `readableBy: "anonymous"` — highlights are public content on public pages. Say so explicitly; the slot's
+  `visibleTo` governs **rendering only** and never governed data.
+- `writableBy: "podcaster"` — only a podcaster writes a highlight. **And fans can still favourite**, because
+  neither floor applies to the `USER` scope: a write floor protects the *shared* surface, and a user
+  partition is unshared. Without that exemption every plugin with a per-user feature would have to declare
+  `writableBy: "fan"` and open its shared scopes along with it.
+
+## Backend-owned keys (SDK 0.6.0)
+The floors above are per **plugin**, not per **document** — and a document in a shared scope
+(`site`/`feed`/`season`/`episode`) has no owner at all. So until 0.6.0, everything above `writableBy` could
+overwrite or delete *any* key in this plugin's store, including one the backend computed. The host cannot
+tell a scheduled write from a `curl`: same table, same key, no author recorded. That is not a
+misconfiguration of this plugin — its floors did exactly what they say. There was simply no way to express
+"this key is the backend's". The SDK's own migration guide demonstrates it against this plugin:
+
+```bash
+curl -b cookie.podcaster -X PUT .../api/plugins/sample/data/site/main/stats \
+     -H "X-XSRF-TOKEN: $XT" -d '{"totalEpisodes":9999,"totalFavourites":1337}'   # 204 — and served to everyone
+```
+
+`data.backendOwned` is the answer. Two keys here are written by `SamplePlugin` and by nothing else:
+
+| Key | Written at | Why a client must not write it |
+|---|---|---|
+| `stats` | `Scope.site()` | The site-wide rollup the site slot displays — a forged one is shown to every visitor. |
+| `favourites` | `Scope.episode(<slug>)` | A tally of data no browser can even read; a client-supplied number is not a count of anything. |
+
+A client `PUT`/`DELETE` to either is now **403** (worded differently from a role-floor 403, so you can tell
+which rule refused you). Reads are untouched and still governed by `readableBy`. `ctx.store()` — the
+backend — is unaffected, which is the entire point. An entry is an exact key, a prefix ending in `*`, or the
+bare `*`; core validates the grammar (`DocStore.BACKEND_OWNED_PATTERN`) at load.
+
+Three things this plugin had to get right, and one it deliberately didn't do:
+- **The declaration does not clean up.** It refuses *new* client writes; a document forged before the
+  declaration existed is served until the backend overwrites it. So `register()` now calls
+  `recomputeHighlightStats(ctx)` **eagerly** as well as scheduling it — otherwise the forgery survives up to
+  `refreshIntervalMinutes`. `SamplePluginTest` asserts on the INFO lines to prove the eager pass exists,
+  since the test kit runs `onSchedule` synchronously and would otherwise hide its absence.
+- **Client-written keys stay undeclared.** `highlight` is the podcaster's, `settings` is the admin panel's,
+  and `fav:<slug>` is the visitor's own. Declaring one would lock this plugin out of its own store;
+  `sample-element.test.tsx` asserts none of the three is covered by a pattern.
+- **It is ignored for `user` scopes.** The backend cannot write a partition at all, so even a bare `*` would
+  leave `data/user/me/…` to its owner. Per-person data belongs in the `USER` scope, not in a shared scope
+  with a declaration bolted on.
+- **Not declared: `*`.** A bare `*` ("everything I store is computed") would be wrong here and would also
+  make `writableBy` vestigial for shared scopes — this plugin's whole point is that a podcaster writes
+  highlights over HTTP.
+
+`InMemoryDocStore.withBackendOwned("stats", "favourites")` enforces the same rule in tests, using
+`asUser(...)` as the stand-in for a client request, so the forged `PUT` above is proven to fail without a
+running host.
 
 ## Two ways to be configurable — and why this plugin uses both
 The manifest declares `refreshIntervalMinutes` (`type: "number", editableBy: "podcaster"`) in its `config`
@@ -184,8 +343,14 @@ own.
 ## Build & test
 ```bash
 ./build.sh        # -> dist/
-cd backend && ./gradlew test  ;  cd ../frontend && npm test
+cd backend  && ./gradlew test
+cd frontend && npm test && npm run typecheck
 ```
+`npm run typecheck` (`tsc --noEmit`) is a separate step on purpose: **Vite transpiles without
+type-checking**, so `npm run build` alone will happily emit a bundle containing a type error. CI runs all
+four, plus a `package` job that runs `./build.sh` itself and asserts the resulting `dist/` is complete and
+that `plugin.json`'s `platformApi` still matches the `plugin-api` version the backend compiles against —
+the unit-test jobs would all stay green if the packaging step broke.
 
 ### What `build.sh` does
 ```bash
@@ -203,12 +368,66 @@ into place (manually, or via the optional `install.sh`) is a separate, deliberat
 `frontend/` is the only framework-specific part of this repo. A Vue/Svelte/etc. author can delete it
 entirely and replace it with their own build, as long as the replacement still produces **one** JS bundle
 at `frontend/build/*.es.js` that calls `defineMosaicastElement` (from `@mosaicast/plugin-sdk`) for each tag
-name declared in `plugin.json`'s `frontend.elements` (there are two now: `sample-highlight` and
-`sample-highlight-settings`). `plugin.json`, `backend/`, and `build.sh` stay untouched — `build.sh`'s
+name declared in `plugin.json`'s `frontend.elements` (there are three now: `sample-highlight`,
+`sample-highlight-card` and `sample-highlight-settings`). `sample-element.test.tsx` asserts that every
+declared tag really is defined and that every slot targets a declared element — manifest/bundle drift is
+otherwise caught by nothing, since core validates the manifest and Vite validates the bundle, and a
+declared-but-undefined element just renders an empty slot. `plugin.json`, `backend/`, and `build.sh` stay
+untouched — `build.sh`'s
 frontend step is just `npm ci && npm run build`, so any toolchain that honors those two npm scripts and
 that output path works unmodified.
 
 ## Changelog
+- **2.7.0** — SDK **0.6.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
+  so a `0.5.x` manifest stops loading the moment the host is on 0.6.0). The manifest declares
+  **`data.backendOwned: ["stats", "favourites"]`** — the two keys `SamplePlugin` computes and no client may
+  write. Before this there was no per-document ownership in a shared scope at all, and a podcaster could
+  `PUT` a forged `stats` that every visitor then read; the SDK's migration guide uses this plugin as the
+  worked example. `register()` now recomputes **eagerly** as well as on its schedule, because the
+  declaration refuses new client writes but does not remove a document forged before it existed. Tests use
+  `InMemoryDocStore.withBackendOwned(...)` to prove the forged write is refused while the backend's own goes
+  through, and `sample-element.test.tsx` asserts the manifest matches `PLATFORM_API_VERSION` and that no
+  client-written key (`highlight`, `settings`, `fav:<slug>`) is covered by a pattern. Nothing else changed:
+  the 0.6.0 contract is source-compatible with 0.5.0. See
+  [Backend-owned keys](#backend-owned-keys-sdk-060).
+- **2.6.0** — SDK **0.5.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
+  so this is not optional once the host is on 0.5.0). Two things changed, one of them a behaviour change:
+  the manifest now declares its **`data` access floor** (`readableBy: "anonymous"`, `writableBy:
+  "podcaster"`) instead of core deriving the read floor from the minimum `visibleTo` across slots — under
+  which this plugin's anonymous display slot exposed its whole doc store; and a per-visitor **favourite**
+  feature demonstrates the host-owned **`user` scope**: `data/user/me/fav:<episodeSlug>` from the frontend,
+  `DocStore.queryAcrossUsers("fav:")` on the backend for the tally, published per episode and rolled into
+  the site `stats` doc. The plugin had no per-user data before, so there was nothing to migrate — the SDK's
+  `MIGRATION.md` step 4 covers plugins that do. See
+  [Per-user data lives in a scope, not in a key](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050) and
+  [The manifest `data` access floor](#the-manifest-data-access-floor-sdk-050). `docs/ARCHITECTURE.md` was
+  re-synced from core's canonical copy in the same pass.
+- **2.5.0** — two additions that closed the last gaps in the "one real example of each" claim.
+  **Removing a highlight**: a **Remove** button in the edit modal behind a two-step confirm, wiring up
+  `ctx.api.delete` and `DocStore.delete(scope, key) → boolean` — until now the only untouched verb on either
+  end of the doc store. This also fixed a real defect: blanking a highlight (the only way to "remove" one
+  before) left a contentless doc that kept the episode in `sitemap.xml` with an empty OpenGraph description
+  and warned on every scheduled recompute forever. `metaFor`/`urls` now test for *publishable* rather than
+  *present*, and the recompute prunes such leftovers. **The `card` placement**: a third element,
+  `sample-highlight-card`, in the `episode`/`card` slot — the compact feed-card badge, kept deliberately
+  separate from the full element (never renders markdown, renders nothing when there's no highlight, makes
+  exactly one request). See [The `card` placement](#the-card-placement--a-second-deliberately-smaller-element)
+  and [Removing a highlight](#removing-a-highlight--the-fourth-doc-store-verb). Also added a manifest↔bundle
+  drift guard asserting every declared element is actually defined.
+- **2.4.1** — maintenance pass, no feature or contract change. Fixes: `metaFor`/`urls` now return
+  empty instead of throwing when core resolves those extension points before any instance has
+  `register()`ed (the same null-`ctx` shape as the PF4J bug below, but reached by lookup order rather than
+  by instance identity — see "A PF4J gotcha"); the visitor-controlled deep-link slug and every scope id are
+  `encodeURIComponent`-ed before becoming an API path segment, so a `..` in `/p/sample/highlight/...` can't
+  be normalized into a request for a different doc; a negative key moment is clamped to `0` rather than
+  stored as a negative `player.seekTo()` target; the edit dialog gets an accessible name
+  (`aria-labelledby`), focuses its textarea on open and hands focus back to the **Edit** button on close.
+  Tooling: `.pre-commit-config.yaml` was **not valid YAML** since the initial bootstrap — the SPDX hook's
+  unquoted `entry:` contains a bare `: `, which terminates a plain YAML scalar, so `pre-commit` failed to
+  load the file at all and the hook had never run for anyone; it is a block scalar now. `dependabot.yml`'s
+  gradle/npm ecosystems pointed at `/` (which matches nothing here) and now point at `/backend`/`/frontend`.
+  CI gained a TypeScript typecheck step, a `push`-to-`master` trigger, Gradle caching, and a `package` job
+  that runs `build.sh` end to end.
 - **2.4.0** — follows core's storage/CSP-enforcement update (the `mc_consent` cookie narrowing the CSP per
   visitor, and the on-load/post-decision storage sweep that deletes anything no manifest declared). No code
   change was *required* — `ctx.consent`'s contract didn't move, and this plugin already declared every

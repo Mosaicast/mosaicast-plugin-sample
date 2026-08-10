@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.4.0",
-  "platformApi": "0.4.0",
+  "version": "2.7.0",
+  "platformApi": "0.6.0",
   "name": "Sample",
   "backend": {
     "basePath": "/api/plugins/sample",
@@ -9,9 +9,10 @@
   },
   "frontend": {
     "entry": "sample.es.js",
-    "elements": ["sample-highlight", "sample-highlight-settings"]
+    "elements": ["sample-highlight", "sample-highlight-card", "sample-highlight-settings"]
   },
   "slots": [
+    { "scope": "episode", "element": "sample-highlight-card",     "placement": "card",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "episode", "element": "sample-highlight",          "placement": "main",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "feed",    "element": "sample-highlight",          "placement": "feed",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "site",    "element": "sample-highlight",          "placement": "site",    "visibleTo": "anonymous", "order": 100 },
@@ -19,6 +20,11 @@
     { "scope": "site",    "element": "sample-highlight-settings", "placement": "sidebar", "visibleTo": "podcaster", "order": 100 }
   ],
   "storage": "doc",
+  "data": {
+    "readableBy": "anonymous",
+    "writableBy": "podcaster",
+    "backendOwned": ["stats", "favourites"]
+  },
   "config": {
     "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }
   },
