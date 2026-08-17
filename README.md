@@ -372,7 +372,9 @@ class of bug can't silently return in a future edit. **If your plugin implements
 extension point on one class, this applies to you too.**
 
 ## Your first plugin in 5 minutes
-**Prerequisite:** the SDK's Java artifacts (`dev.mosaicast:plugin-api`/`plugin-testkit`) are published to
+**Prerequisites:** **Java 21** and **Node 22 or newer** (jsdom 30, which the tests run in, refuses
+anything older; Node 20 went end-of-life in April 2026). Beyond that, the SDK's Java artifacts
+(`dev.mosaicast:plugin-api`/`plugin-testkit`) are published to
 GitHub Packages, which requires authentication even for public reads. Export a GitHub PAT with
 `read:packages` before building the backend: `export GITHUB_TOKEN=<your PAT>` (and `GITHUB_ACTOR=<your
 username>` if `gradle.properties`' `gpr.user` isn't set). CI supplies this automatically.
