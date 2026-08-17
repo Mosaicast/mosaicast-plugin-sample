@@ -643,7 +643,7 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
   it('does not render the consent extras inside the site deep-link view', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {}, navigate: () => {} },
+      route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
     });
@@ -811,7 +811,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
       user: { id: 'u1', role: 'admin' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {}, navigate: () => {} },
+      route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
     });
@@ -832,7 +832,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     // browser and point the request at a different doc than the one the deep link names.
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/../../site/main/settings', onChange: () => () => {}, navigate: () => {} },
+      route: { path: 'highlight/../../site/main/settings' },
     });
     mount(ctx);
     await flush();
@@ -922,10 +922,11 @@ describe('Highlight — ctx.route.navigate (SPA navigation inside /p/sample/, SD
   });
 
   it('navigates back to the plugin page root from the deep-link view', async () => {
-    const navigate = vi.fn();
+    // `route` is the one override makeMockCtx *merges* (SDK 0.7.1): pinning `path` is enough, and the
+    // default `navigate` it leaves in place is still the one recording into `ctx.navigations`.
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {}, navigate },
+      route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
     });
@@ -937,7 +938,7 @@ describe('Highlight — ctx.route.navigate (SPA navigation inside /p/sample/, SD
     const handled = clickWasHandled(backLink);
 
     // '' is the plugin's own page root: navigate's argument is always relative to /p/sample/.
-    expect(navigate).toHaveBeenCalledWith('');
+    expect(ctx.navigations).toEqual([{ subpath: '', replace: false }]);
     expect(handled).toBe(true);
   });
 });

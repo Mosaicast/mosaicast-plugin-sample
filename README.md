@@ -27,7 +27,7 @@ and a per-visitor "favourite" feature demonstrates the release's headline contra
 `queryAcrossUsers` rollup that is the only honest way to count it. **2.7.0** moves it onto **SDK 0.6.0**,
 which closes the other half of that ownership story: the two keys this plugin's backend computes are now
 declared [`data.backendOwned`](#backend-owned-keys-sdk-060), so a client can no longer forge them.
-**2.8.0** moves it onto **SDK 0.7.0** and wires the one field of that release a doc-store plugin can use:
+**2.8.0** moves it onto **SDK 0.7.1** and wires the one field of that release a doc-store plugin can use:
 every link into this plugin's own `/p/sample/*` page subtree now hands a plain click to
 [`ctx.route.navigate`](#internal-links-go-through-ctxroutenavigate-sdk-070) — SPA navigation — while
 keeping the `href` that makes it a link at all.
@@ -341,7 +341,10 @@ function internalLink(route: PluginRoute, subpath: string) {
 
 `Highlight.test.tsx` covers all three halves of that: the plain click records a `navigate` (the test kit's
 `ctx.navigations`) and cancels the default, every modifier and the middle-click record nothing and stay
-uncancelled, and the `href` survives either way.
+uncancelled, and the `href` survives either way. Note what the deep-link test does **not** do — it pins
+`route: { path: 'highlight/ep-1' }` and nothing else. Since 0.7.1 `route` is the one `makeMockCtx` override
+that *merges* over the default, so the `navigate` you leave out is still the recording one; hand-building
+the whole handle would replace the recorder with a stub that quietly stops matching the contract.
 
 ## A PF4J gotcha: one class, three extension points, but *not* one instance
 Fixing the `page`-slot gap above surfaced a second, subtler bug: booting a real core and hitting
@@ -424,8 +427,8 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
-- **2.8.0** — SDK **0.7.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
-  so a `0.6.x` manifest stops loading the moment the host is on 0.7.0). The two additions in 0.7.0:
+- **2.8.0** — SDK **0.7.1** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
+  so a `0.6.x` manifest stops loading the moment the host is on 0.7.x). The two additions in the 0.7 line:
   - **[`ctx.route.navigate(subpath, { replace })`](#internal-links-go-through-ctxroutenavigate-sdk-070)**
     is now what both of this plugin's internal links use — the browse index's per-episode entries and the
     deep-link back-link. They keep their `href` (middle-click, "open in new tab" and crawlers read the
@@ -436,9 +439,19 @@ that output path works unmodified.
     `storage.schema`, and this one uses the doc store, which is the default and covers nearly everything.
     Nothing to exercise short of changing what the plugin stores.
 
-  One upgrade consequence worth knowing: `PluginRoute` gained a required `navigate`, so the four tests that
-  hand-build a `route` override for `makeMockCtx` no longer type-check without it. **`npm test` passed
-  either way — only `npm run typecheck` caught it**, which is the argument for that script existing.
+  **Why 0.7.1 and not 0.7.0.** `PluginRoute` gained a *required* `navigate` in 0.7.0, which broke every
+  test that hand-builds a whole `route` override for `makeMockCtx` — this repo had four. **`npm test`
+  passed either way; only `npm run typecheck` caught it**, which is the argument for that script existing.
+  0.7.1 is the patch that fixes the cause rather than the symptom: `route` is now the one override
+  `makeMockCtx` **merges** over its default instead of replacing, so `route: { path: 'highlight/ep-1' }` is
+  the whole override again and what you leave out keeps working — `navigate` still records into
+  `ctx.navigations`, `onChange` still returns a live unsubscribe. All four stubs are gone here, which
+  matters for a copy template: a pasted `onChange: () => () => {}` is a fake that silently stops matching
+  the contract at the next bump.
+
+  `platformApi` reads **`0.7.1`** because `sample-element.test.tsx` asserts it equals the SDK's own
+  `PLATFORM_API_VERSION` **exactly** — the check that would have caught a stale manifest in the first
+  place. Core only ever compares `major.minor`, so this still loads on a host running 0.7.0.
 - **2.7.0** — SDK **0.6.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
   so a `0.5.x` manifest stops loading the moment the host is on 0.6.0). The manifest declares
   **`data.backendOwned: ["stats", "favourites"]`** — the two keys `SamplePlugin` computes and no client may
