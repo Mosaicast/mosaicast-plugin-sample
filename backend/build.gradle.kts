@@ -32,8 +32,8 @@ repositories {
 
 dependencies {
     compileOnly("dev.mosaicast:plugin-api:0.7.1")
-    compileOnly("org.pf4j:pf4j:3.12.0")
-    annotationProcessor("org.pf4j:pf4j:3.12.0") // generates the PF4J extension index for @Extension
+    compileOnly("org.pf4j:pf4j:3.15.0")
+    annotationProcessor("org.pf4j:pf4j:3.15.0") // generates the PF4J extension index for @Extension
 
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
