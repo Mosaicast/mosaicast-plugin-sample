@@ -34,9 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # jsdom 30 declares `engines: ^22.22.2 || ^24.15.0 || >=26`, and on Node 20 its bundled undici
+      # dies at import with `webidl.util.markAsUncloneable is not a function` before a single test runs.
+      # Node 20 went end-of-life in April 2026 anyway, so the floor moves rather than the dependency.
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -70,9 +73,10 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      # Same floor as the frontend job above — build.sh runs the same npm install.
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
