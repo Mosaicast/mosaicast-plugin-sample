@@ -10,7 +10,9 @@ See `docs/ARCHITECTURE.md` for the big picture and `docs/BRIEF.md` for this repo
 This plugin ("Episode Highlight", id `sample`) is a podcaster-editable markdown highlight shown at
 **episode**, **feed/podcast** and **site** scope. That feature is intentionally simple — the point of this
 repo is not the highlight, it's that **every field of `ctx` and every optional backend extension point
-the platform currently offers a plugin is exercised somewhere in this codebase**, so a new plugin author
+the platform currently offers a plugin is exercised somewhere in this codebase** (with one documented
+exception: `ctx.schema`/`schema()`, which is `null` for a doc-store plugin and unreachable without
+changing what this one stores), so a new plugin author
 has one real, tested example of each to copy from. Version **2.1.0** brought the plugin from "demonstrates
 the basics" to "demonstrates the whole v1 contract"; **2.2.0** fixed a real bug this plugin had against a
 then-just-landed core (see [Changelog](#changelog) and "Deep links need a `page` slot" below) and confirmed
@@ -25,6 +27,10 @@ and a per-visitor "favourite" feature demonstrates the release's headline contra
 `queryAcrossUsers` rollup that is the only honest way to count it. **2.7.0** moves it onto **SDK 0.6.0**,
 which closes the other half of that ownership story: the two keys this plugin's backend computes are now
 declared [`data.backendOwned`](#backend-owned-keys-sdk-060), so a client can no longer forge them.
+**2.8.0** moves it onto **SDK 0.7.0** and wires the one field of that release a doc-store plugin can use:
+every link into this plugin's own `/p/sample/*` page subtree now hands a plain click to
+[`ctx.route.navigate`](#internal-links-go-through-ctxroutenavigate-sdk-070) — SPA navigation — while
+keeping the `href` that makes it a link at all.
 
 ## What's demonstrated, and where
 
@@ -40,11 +46,12 @@ declared [`data.backendOwned`](#backend-owned-keys-sdk-060), so a client can no 
 | `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
 | `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
 | `player` | An optional per-highlight "key moment" (seconds): a "▶ Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "✓ played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
-| `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). |
+| `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). Both links *into* that subtree — the browse index's per-episode entries and the back-link out of a deep link — keep their `href` **and** hand a plain left-click to `ctx.route.navigate` (0.7.0), which is SPA navigation rather than a full document load: see [below](#internal-links-go-through-ctxroutenavigate-sdk-070). |
 | `locale` | `createPluginI18n` + `locales/{en,de}.json`, reacting to `ctx.locale.onChange`; the translator instance is memoized and its `dispose()` called on cleanup (a leak `createPluginI18n`'s own docs flag as worth fixing once `onChange` returns something to unsubscribe with). |
 | `progress` | An **opt-in** spoiler gate: a highlight the podcaster explicitly marks `spoiler: true` in the edit modal stays hidden behind a "Show anyway" button until `ctx.progress.get()` reports this visitor has actually started the episode. Not access control — a courtesy, same spirit as bingo's spoiler protection. |
 | `theme` | Unchanged from 2.0: injected as `--mc-*` custom properties by `defineMosaicastElement`, re-applied explicitly inside `HighlightModal`'s document-level portal. |
 | `log` | New in 0.4.0 — replaces the old `POST /api/plugins/{id}/log`. Called on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, an admin settings save/failure, and every consent request/grant/deny in `ConsentExtras`. |
+| `schema` | New in 0.7.0, and the **one** `ctx` field this plugin does not exercise — deliberately, because it cannot. `ctx.schema` is `null` unless the manifest declares `storage.schema`, and this one declares `"storage": "doc"`; the doc store is the default and covers nearly everything, so it is what the reference plugin should demonstrate. Reaching the schema client would mean changing what this plugin stores. Its Java half is the same story — see `schema()` below. |
 
 The **site/sidebar, `visibleTo: "podcaster"`** slot (`sample-highlight-settings`, `components/AdminSettings.tsx`)
 is a second Web Component with its own `ctx` — see "Two ways to be configurable" below for why it exists.
@@ -90,7 +97,7 @@ modal inside an already-portalled modal is more machinery than one destructive c
 | Member | What this plugin does with it |
 |---|---|
 | `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
-| `schema()` | Not used — `plugin.json` declares `"storage": "doc"`, so this is always `null`. Core's own 0.4.0 plan keeps `schema()` returning `null` regardless of what a manifest declares ("deferred — schema() keeps returning null, which 0.4.0 explicitly allows"), so there's nothing to wire up yet even though the SDK's `SchemaStore`/`Criteria` query surface is real as of 0.4.0. |
+| `schema()` | Not used — the manifest is the one place a plugin says which store it uses, and this one declares `"storage": "doc"`, so `schema()` is `null` by contract. It is `null` for every plugin that does not declare `storage.schema`; the doc store is the default and covers nearly everything, which is why the reference plugin uses it. Exercising `SchemaStore`/`Criteria` would mean changing what this plugin stores, not adding a call. Same story on the frontend — see `ctx.schema` above. |
 | `config()` | `refreshIntervalMinutes` — read and passed to `onSchedule`. Genuinely admin/podcaster-editable today via core's generic config-admin form (`PUT /api/admin/plugins/sample/config`) — see "Two ways to be configurable" below. |
 | `feeds()` | `episodesIn(Scope.site())` for the stats aggregate and the sitemap; `display(refId)` for the deep link's OG title/artwork. |
 | `onSchedule` | Recomputes the highlighted-episode count (and how many have a key moment), prunes contentless docs, and rolls up per-visitor favourites, every `refreshIntervalMinutes`. |
@@ -297,6 +304,45 @@ outside the `page` placement). Confirmed live: `/p/sample` (browse index), `/p/s
 (single highlight, real OG tags), and `/sitemap.xml` (lists every highlighted episode's deep link) all now
 return the right thing.
 
+## Internal links go through `ctx.route.navigate` (SDK 0.7.0)
+Owning `/p/sample/*` means this plugin renders its own links into it: the browse index lists one per
+highlighted episode, and the deep-link view has a back-link to the page root. Until 0.7.0 those could only
+be a plain `<a href>`, and a plain `<a href>` inside your own page subtree is a **full document load** — the
+shell, core's bundle and this plugin's bundle all fetched and re-parsed to render a page the already-mounted
+component could have rendered from memory. `ctx.route.navigate(subpath, { replace })` is the host handle
+that avoids it: real SPA navigation, a history entry, a working back button.
+
+The lesson worth copying is that this plugin wires **both**, in one helper (`internalLink` in
+`Highlight.tsx`), rather than swapping one for the other:
+
+```tsx
+function internalLink(route: PluginRoute, subpath: string) {
+  return {
+    href: `/p/sample/${subpath}`,
+    onClick: (e: MouseEvent<HTMLAnchorElement>) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      route.navigate(subpath);
+    },
+  };
+}
+```
+
+- **The `href` stays** because it is what makes a link a link. Middle-click, "open in new tab", copy-link,
+  the status bar on hover and a crawler following it all read the attribute; none of them run the handler.
+  Dropping it for an `onClick`-only `<span>` is the classic SPA regression.
+- **The modifier guard is the reason both can coexist.** A ctrl/cmd/shift/alt-click or a non-primary button
+  must fall through untouched, or "open in new tab" silently navigates the current tab instead.
+- `subpath` is relative to `/p/sample/` — the same coordinate `ctx.route.path` hands back, already
+  percent-encoded here because the episode slug is visitor-controlled. A plugin **cannot** name another
+  plugin's route or a core one; the host prefixes its namespace and drops any attempt to climb out.
+- Do **not** reach past the handle. `history.pushState` plus a synthetic `popstate` happens to work against
+  core's current router, and the SDK explicitly says it is not part of the contract.
+
+`Highlight.test.tsx` covers all three halves of that: the plain click records a `navigate` (the test kit's
+`ctx.navigations`) and cancels the default, every modifier and the middle-click record nothing and stay
+uncancelled, and the `href` survives either way.
+
 ## A PF4J gotcha: one class, three extension points, but *not* one instance
 Fixing the `page`-slot gap above surfaced a second, subtler bug: booting a real core and hitting
 `/p/sample/highlight/<slug>` returned the site-level OG fallback instead of ours, and the log showed
@@ -379,14 +425,20 @@ that output path works unmodified.
 
 ## Changelog
 - **2.8.0** — SDK **0.7.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
-  so a `0.6.x` manifest stops loading the moment the host is on 0.7.0). **Nothing else changed** — both
-  additions in 0.7.0 are new surface this plugin does not yet use:
-  - **`ctx.schema`** is `null` here and stays that way. It exists for a plugin that declares
-    `storage.schema`; this one uses the doc store, which is the default and covers nearly everything.
-  - **`ctx.route.navigate(subpath, { replace })`** is the one worth a look for anyone copying this repo:
-    this plugin *does* declare a `page` slot, so it owns `/p/sample/*`, and an internal link there should
-    call `navigate` (while keeping its `href`) rather than costing a full document load. Not wired up here
-    yet — the sample's page renders a single view with nothing to navigate to.
+  so a `0.6.x` manifest stops loading the moment the host is on 0.7.0). The two additions in 0.7.0:
+  - **[`ctx.route.navigate(subpath, { replace })`](#internal-links-go-through-ctxroutenavigate-sdk-070)**
+    is now what both of this plugin's internal links use — the browse index's per-episode entries and the
+    deep-link back-link. They keep their `href` (middle-click, "open in new tab" and crawlers read the
+    attribute, not the handler) and hand only a plain, unmodified left-click to `navigate`, which is SPA
+    navigation instead of a full reload of the shell and both bundles. This repo claims to exercise *every*
+    field of `ctx`, so a new field with two obvious call sites already in the tree is a gap, not a footnote.
+  - **`ctx.schema`** is `null` here and stays that way — it exists for a plugin that declares
+    `storage.schema`, and this one uses the doc store, which is the default and covers nearly everything.
+    Nothing to exercise short of changing what the plugin stores.
+
+  One upgrade consequence worth knowing: `PluginRoute` gained a required `navigate`, so the four tests that
+  hand-build a `route` override for `makeMockCtx` no longer type-check without it. **`npm test` passed
+  either way — only `npm run typecheck` caught it**, which is the argument for that script existing.
 - **2.7.0** — SDK **0.6.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
   so a `0.5.x` manifest stops loading the moment the host is on 0.6.0). The manifest declares
   **`data.backendOwned: ["stats", "favourites"]`** — the two keys `SamplePlugin` computes and no client may
