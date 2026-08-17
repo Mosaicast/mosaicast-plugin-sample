@@ -256,10 +256,12 @@ interface PluginContext {
   episode?: { status: 'PLANNED'|'PUBLISHED'|'WITHDRAWN' }; // on episode scope
   user:     { id: string; role: Role } | null;
   api:      PluginApiClient;          // calls /api/plugins/<id>/* with auth token
+  schema:   SchemaClient | null;      // read-only; null unless the manifest declares a schema (§7.6)
   consent:  { has(cat: string): boolean; onChange(cb: () => void): void };
   filter:   { current(): FilterState; onChange(cb: (f: FilterState) => void): void }; // read-only
   player:   { currentTime(): number; seekTo(s: number): void; on(ev, cb): void };     // for sync plugins
-  route:    { path: string; onChange(cb: (p: string) => void): void };   // subpath under /p/<pluginId>/ (§6.4)
+  route:    { path: string; onChange(cb: (p: string) => void): void;     // subpath under /p/<pluginId>/ (§6.4)
+              navigate(subpath: string, opts?: { replace?: boolean }): void };  // within that subtree only
   locale:   { current(): string; onChange(cb: (l: string) => void): void }; // active UI locale (§12.7)
   progress: { get(episodeId: string): Promise<number | null> };          // core listening progress, seconds (§6.5)
   theme:    ThemeTokens;              // host colors/spacing as CSS variables
@@ -268,6 +270,8 @@ interface PluginContext {
 **Important:** plugins *consume* filters, they don't *define* them. Filter axes (season, tags, sorting) belong to the host.
 
 **`ctx.scope` stays four-valued.** `USER` (§7.6) addresses storage, not a page — a slot is mounted into a named region of a view and there is no user view — so it appears in a `data/{scopeType}/{scopeId}/…` path and never in `ctx.scope`. A component reading per-user data addresses `data/user/me/…` explicitly while its `ctx.scope` remains whatever page it is on.
+
+**`route.navigate` is the only outbound handle on this context**, and it is namespace-confined by the *host*, not by the plugin's good behaviour: the subpath is resolved under `/p/<pluginId>/`, a leading `/` is stripped and `..` segments are dropped, so another plugin's route or a core one is unnameable rather than merely refused — the same property `ctx.schema` has for tables. It exists because a `page` plugin owns a URL subtree and had no supported way to move inside it: an `<a href>` is a full document load that re-fetches the shell, the plugin registry and every plugin bundle, and the workaround that *worked* (`history.pushState` plus a synthetic `popstate`) silently coupled plugins to the host's router choice. Keep the real `href` on links — middle-click, "open in new tab" and crawlers need it; `navigate` only takes over the plain-click path.
 
 ### 7.6 Generic store + schema provider
 - **Access floor:** declared in the manifest (`"data"`, §7.2), never derived from slots. The `USER` scope is exempt from **both** floors — see below.
@@ -282,6 +286,16 @@ interface PluginContext {
       "slug": "string:indexed:unique", "title": "string",
       "markdown": "text:fulltext", "updatedAt": "timestamp:indexed" } } }
   ```
+- **Reading a schema from the frontend:** provisioning without access is half a feature — the full-text index the platform builds exists for a search box, and the search box is in the browser. So the host serves a **read-only** surface per plugin, mapping one-to-one onto `SchemaStore` and reached through `ctx.schema` (`null` for a doc-store plugin, mirroring `ctx.schema()`):
+  ```text
+  GET /api/plugins/{id}/schema/{entity}?where=&orderBy=&page=&size=
+  GET /api/plugins/{id}/schema/{entity}/search?field=&q=&where=&orderBy=&page=&size=
+  GET /api/plugins/{id}/schema/{entity}/count?where=
+  GET /api/plugins/{id}/schema/{entity}/{rowId}
+  ```
+  A query is *described*, never written: `where=field:op:value` and `orderBy=field:asc|desc` name **declared** fields, the host resolves them against that plugin's own manifest and builds the statement, and every value is bound as a parameter — so this adds no injection surface over what `SchemaStore` already had. Values are read against the field's declared type, so a malformed one is a **400** rather than a driver error. Access is the same `data.readableBy` floor as the doc surface, and there is no `USER` exemption to make here because schema tables are per plugin and these paths carry no scope. An undeclared **entity** is a **404** (over HTTP it is a path segment, i.e. an address); an undeclared **field**, an unreadable value, or `search` on a field that is not `:fulltext` is a **400**. Paging follows the doc surface (`page` from 0, `size` 50, capped at 200).
+- **No schema writes over HTTP, and this shapes plugin design.** A v1 plugin authors no routes (§7.4), so no plugin code runs at request time — there is nowhere to enforce slug uniqueness, append a revision atomically, or reject malformed input. Exposing writes would hand clients direct row access with *no plugin code in the path*, which is worse than the doc store's position rather than better. The plugin's **backend stays the only writer of relational truth**: a frontend that must write puts a document in the doc store and the backend ingests it on its schedule. The consequence is that such a write is **eventually consistent** — an editor does not see its own save through `ctx.schema` until the next tick, and a plugin with an editing UI (the wiki) must design for that with an optimistic render or an explicit saving state. Changing this needs a request-time plugin hook, which is a v1-contract decision and not a gap to be filled quietly.
+- **Not rate-limited.** `GET /api/plugins/**` is outside the rate limiter, which covers auth and upload paths, so an anonymous full-text search is capped only by `size`. Same posture as the doc-store list endpoint — but full-text is more expensive per call, so an operator exposing a large corpus should expect to front it.
 
 ### 7.7 On-request aggregation
 Feed/season-level aggregates (e.g. stats sums) are computed **lazily**, the Web Component shows a loading bar meanwhile, the result is cached in the store and invalidated on new episodes.
