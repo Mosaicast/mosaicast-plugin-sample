@@ -378,6 +378,15 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.8.0** — SDK **0.7.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
+  so a `0.6.x` manifest stops loading the moment the host is on 0.7.0). **Nothing else changed** — both
+  additions in 0.7.0 are new surface this plugin does not yet use:
+  - **`ctx.schema`** is `null` here and stays that way. It exists for a plugin that declares
+    `storage.schema`; this one uses the doc store, which is the default and covers nearly everything.
+  - **`ctx.route.navigate(subpath, { replace })`** is the one worth a look for anyone copying this repo:
+    this plugin *does* declare a `page` slot, so it owns `/p/sample/*`, and an internal link there should
+    call `navigate` (while keeping its `href`) rather than costing a full document load. Not wired up here
+    yet — the sample's page renders a single view with nothing to navigate to.
 - **2.7.0** — SDK **0.6.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
   so a `0.5.x` manifest stops loading the moment the host is on 0.6.0). The manifest declares
   **`data.backendOwned: ["stats", "favourites"]`** — the two keys `SamplePlugin` computes and no client may

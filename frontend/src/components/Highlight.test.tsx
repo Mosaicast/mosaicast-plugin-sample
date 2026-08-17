@@ -643,7 +643,7 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
   it('does not render the consent extras inside the site deep-link view', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {} },
+      route: { path: 'highlight/ep-1', onChange: () => () => {}, navigate: () => {} },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
     });
@@ -811,7 +811,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
       user: { id: 'u1', role: 'admin' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {} },
+      route: { path: 'highlight/ep-1', onChange: () => () => {}, navigate: () => {} },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
     });
@@ -832,7 +832,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     // browser and point the request at a different doc than the one the deep link names.
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/../../site/main/settings', onChange: () => () => {} },
+      route: { path: 'highlight/../../site/main/settings', onChange: () => () => {}, navigate: () => {} },
     });
     mount(ctx);
     await flush();
