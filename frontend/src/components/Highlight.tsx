@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PluginContext } from '@mosaicast/plugin-sdk';
+import type { MouseEvent } from 'react';
+import type { PluginContext, PluginRoute } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { makeI18n } from '../i18n';
@@ -28,6 +29,36 @@ interface HighlightStats {
 /** The subpath prefix this plugin's deep links use under `/p/sample/` (ARCHITECTURE §6.4). */
 const DEEP_LINK_PREFIX = 'highlight/';
 
+/**
+ * Props for a link that stays inside this plugin's own page subtree: a real `href` **and** an `onClick`
+ * that routes a plain left-click through `ctx.route.navigate` instead (SDK 0.7.0).
+ *
+ * Both halves matter, which is why this is a helper rather than one or the other:
+ *
+ * - The `href` is what makes the link a link — middle-click, "open in new tab", copy-link, a crawler
+ *   following it, and the status bar on hover all read the attribute, not the handler.
+ * - `navigate` makes the plain click *SPA* navigation: a history entry and a working back button with no
+ *   reload of the shell or of this bundle, where the bare `href` costs a full document load.
+ *
+ * The modifier guard is the point of keeping both. A ctrl/cmd/shift/alt-click or a non-primary button has
+ * to fall through to the browser untouched, or "open in new tab" silently navigates the current tab.
+ *
+ * @param route   `ctx.route` — the host handle; never `history.pushState`, which the SDK calls out as
+ *                explicitly outside the contract
+ * @param subpath the target below `/p/sample/`, already percent-encoded; `''` is the plugin's page root
+ * @returns `href`/`onClick` props to spread onto an `<a>`
+ */
+function internalLink(route: PluginRoute, subpath: string) {
+  return {
+    href: `/p/sample/${subpath}`,
+    onClick: (e: MouseEvent<HTMLAnchorElement>) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      route.navigate(subpath);
+    },
+  };
+}
+
 /** Renders markdown to sanitized HTML — never trust a podcaster-authored string verbatim (ARCHITECTURE §12.6). */
 function renderMarkdown(markdown: string): string {
   return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
@@ -45,7 +76,8 @@ function renderMarkdown(markdown: string): string {
  * - `filter` — a read-only "filtered to season N" note at feed/site scope.
  * - `player` — a key-moment jump button + "played" indicator at episode scope.
  * - `route` — the site-scope element doubles as a shareable single-highlight page when `ctx.route.path`
- *   matches `highlight/<slug>`.
+ *   matches `highlight/<slug>`, and every link *back into* that subtree goes through `route.navigate`
+ *   (SDK 0.7.0) rather than costing a document load — see {@link internalLink}.
  * - `progress` — an opt-in (`highlight.spoiler`) reveal gate at episode scope.
  * - the **`user` storage scope** (SDK 0.5.0) — a signed-in visitor's own "favourite" mark, written to
  *   `data/user/me/fav:<episodeSlug>` and readable only by them. Its public tally comes back from a
@@ -54,6 +86,9 @@ function renderMarkdown(markdown: string): string {
  * - `log` — sent on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, and every
  *   consent request/grant/deny (inside {@link ConsentExtras}) — real signal from real user actions, not
  *   a demo-only call site.
+ *
+ * The one field it does not touch is `ctx.schema` (0.7.0), which is `null` for any plugin whose manifest
+ * declares `"storage": "doc"` — as this one's does, the doc store being the default.
  *
  * Reads/writes go through `ctx.api`'s generic doc-store surface, never through a plugin-authored route.
  */
@@ -346,7 +381,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       `}</style>
 
       {inDeepLink && (
-        <a className="back" href="/p/sample/">
+        <a className="back" {...internalLink(ctx.route, '')}>
           {i18n.t('browse.back')}
         </a>
       )}
@@ -436,7 +471,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           <ul>
             {ctx.episodes.map((slug) => (
               <li key={slug}>
-                <a href={`/p/sample/${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`}>
+                <a {...internalLink(ctx.route, `${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`)}>
                   {ctx.episodeLabels?.[slug] ?? slug}
                 </a>
               </li>

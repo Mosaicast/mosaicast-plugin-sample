@@ -21,7 +21,7 @@ Vite does not type-check — `npm run typecheck` (`tsc --noEmit`) is the only th
 ## Conventions (binding)
 - Java packages `dev.mosaicast.*`; npm scope `@mosaicast`.
 - Plugins import ONLY against the SDK, never against core code.
-- The manifest `platformApi` must match the built SDK version (**currently 0.6.0**) — core compares `major.minor` exactly and rejects a mismatch at load.
+- The manifest `platformApi` must match the built SDK version (**currently 0.7.1**) — core compares `major.minor` exactly and rejects a mismatch at load.
 - Never commit secrets; configure via `.env` / environment variables.
 - Migrations exclusively via Flyway.
 - **Tests are part of the work** (see DoD in the BRIEF, ARCHITECTURE §13.5; plugins test against the SDK test kit).

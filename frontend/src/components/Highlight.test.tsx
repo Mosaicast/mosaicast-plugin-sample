@@ -643,7 +643,7 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
   it('does not render the consent extras inside the site deep-link view', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {} },
+      route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
     });
@@ -811,7 +811,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
       user: { id: 'u1', role: 'admin' },
-      route: { path: 'highlight/ep-1', onChange: () => () => {} },
+      route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
       apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
     });
@@ -832,7 +832,7 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     // browser and point the request at a different doc than the one the deep link names.
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      route: { path: 'highlight/../../site/main/settings', onChange: () => () => {} },
+      route: { path: 'highlight/../../site/main/settings' },
     });
     mount(ctx);
     await flush();
@@ -854,5 +854,91 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
 
     const link = Array.from(container.querySelectorAll('a')).find((a) => a.textContent === 'ep 1/odd')!;
     expect(link.getAttribute('href')).toBe('/p/sample/highlight/ep%201%2Fodd');
+  });
+});
+
+describe('Highlight — ctx.route.navigate (SPA navigation inside /p/sample/, SDK 0.7.0)', () => {
+  /**
+   * Clicks a link the way a browser reports it and answers the question these tests actually ask: did the
+   * component's handler call `preventDefault`, i.e. did it take the click instead of letting the `href` run?
+   *
+   * The document-level listener runs after React's (which is bound to the mount container, further down the
+   * tree) and cancels whatever survived — otherwise jsdom would try to follow the `href` for real and log
+   * `Not implemented: navigation` on every fall-through case.
+   */
+  function clickWasHandled(el: Element, init: MouseEventInit = { button: 0 }): boolean {
+    let handled = false;
+    const stopRealNavigation = (e: Event) => {
+      handled = e.defaultPrevented;
+      e.preventDefault();
+    };
+    document.addEventListener('click', stopRealNavigation);
+    try {
+      act(() => {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+      });
+    } finally {
+      document.removeEventListener('click', stopRealNavigation);
+    }
+    return handled;
+  }
+
+  it('routes a plain click on a browse-index link through navigate instead of the href', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      episodes: ['ep 1/odd'],
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const link = Array.from(container.querySelectorAll('a')).find((a) => a.textContent === 'ep 1/odd')!;
+    const handled = clickWasHandled(link);
+
+    // The subpath is the same coordinate `ctx.route.path` hands back — relative to /p/sample/, not absolute.
+    expect(ctx.navigations).toEqual([{ subpath: 'highlight/ep%201%2Fodd', replace: false }]);
+    // preventDefault is what stops the browser also performing the href's full document load.
+    expect(handled).toBe(true);
+  });
+
+  it('lets a modified click fall through to the browser, so "open in new tab" still opens a new tab', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      episodes: ['ep-1'],
+      episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const link = Array.from(container.querySelectorAll('a')).find((a) => a.textContent === 'S01E01 · Pilot')!;
+    for (const modifier of ['metaKey', 'ctrlKey', 'shiftKey', 'altKey'] as const) {
+      expect(clickWasHandled(link, { button: 0, [modifier]: true })).toBe(false);
+    }
+    // Same for a middle-click, which the browser turns into a new tab on its own.
+    expect(clickWasHandled(link, { button: 1 })).toBe(false);
+
+    expect(ctx.navigations).toEqual([]);
+    // The href survives all of it — that attribute is what a new tab, a copied link and a crawler read.
+    expect(link.getAttribute('href')).toBe('/p/sample/highlight/ep-1');
+  });
+
+  it('navigates back to the plugin page root from the deep-link view', async () => {
+    // `route` is the one override makeMockCtx *merges* (SDK 0.7.1): pinning `path` is enough, and the
+    // default `navigate` it leaves in place is still the one recording into `ctx.navigations`.
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      route: { path: 'highlight/ep-1' },
+      episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
+      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const backLink = container.querySelector('a.back')!;
+    expect(backLink.getAttribute('href')).toBe('/p/sample/');
+    const handled = clickWasHandled(backLink);
+
+    // '' is the plugin's own page root: navigate's argument is always relative to /p/sample/.
+    expect(ctx.navigations).toEqual([{ subpath: '', replace: false }]);
+    expect(handled).toBe(true);
   });
 });
