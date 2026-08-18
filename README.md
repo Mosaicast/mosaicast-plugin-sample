@@ -30,7 +30,11 @@ declared [`data.backendOwned`](#backend-owned-keys-sdk-060), so a client can no 
 **2.8.0** moves it onto **SDK 0.7.1** and wires the one field of that release a doc-store plugin can use:
 every link into this plugin's own `/p/sample/*` page subtree now hands a plain click to
 [`ctx.route.navigate`](#internal-links-go-through-ctxroutenavigate-sdk-070) — SPA navigation — while
-keeping the `href` that makes it a link at all.
+keeping the `href` that makes it a link at all. **2.9.0** moves it onto **SDK 0.8.0**, whose headline is
+that a plugin can finally accept a **file**: a highlight may now carry a podcaster-uploaded image
+([`ctx.blobs`](#file-uploads-live-behind-a-manifest-declaration-sdk-080), declared in the manifest and swept
+for orphans by the backend), and [`ctx.links`](#links-vs-navigate-two-different-questions) replaces the
+hardcoded episode URL every plugin used to write by hand.
 
 ## What's demonstrated, and where
 
@@ -51,6 +55,8 @@ keeping the `href` that makes it a link at all.
 | `progress` | An **opt-in** spoiler gate: a highlight the podcaster explicitly marks `spoiler: true` in the edit modal stays hidden behind a "Show anyway" button until `ctx.progress.get()` reports this visitor has actually started the episode. Not access control — a courtesy, same spirit as bingo's spoiler protection. |
 | `theme` | Unchanged from 2.0: injected as `--mc-*` custom properties by `defineMosaicastElement`, re-applied explicitly inside `HighlightModal`'s document-level portal. |
 | `log` | New in 0.4.0 — replaces the old `POST /api/plugins/{id}/log`. Called on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, an admin settings save/failure, and every consent request/grant/deny in `ConsentExtras`. |
+| `blobs` | New in 0.8.0 — an optional podcaster-uploaded **image** on a highlight, and the reason this plugin's manifest carries a [`blobs` block](#file-uploads-live-behind-a-manifest-declaration-sdk-080) at all (`ctx.blobs` is `null` without one). The edit modal reads `quota()` *before* a file is picked, `upload()`s the pick, stores only the returned **`ref`**, and `remove()`s whatever it stopped pointing at; the view derives the URL with `urlFor(ref)` at render time. Served same-origin, so unlike `ConsentExtras`' external `<img>` it needs no declared CSP host and makes no consent decision. |
+| `links` | New in 0.8.0 — `episode(slug, { t })` on every browse-index row and on the deep-link view (where `t` is the podcaster's own key moment, turning it into core's timestamp deep link), and `feed(slug, { season })` on the feed-scope filter note. Strings for real `href`s, never navigation — see [below](#links-vs-navigate-two-different-questions) for why this is separate from `ctx.route`. |
 | `schema` | New in 0.7.0, and the **one** `ctx` field this plugin does not exercise — deliberately, because it cannot. `ctx.schema` is `null` unless the manifest declares `storage.schema`, and this one declares `"storage": "doc"`; the doc store is the default and covers nearly everything, so it is what the reference plugin should demonstrate. Reaching the schema client would mean changing what this plugin stores. Its Java half is the same story — see `schema()` below. |
 
 The **site/sidebar, `visibleTo: "podcaster"`** slot (`sample-highlight-settings`, `components/AdminSettings.tsx`)
@@ -97,6 +103,7 @@ modal inside an already-portalled modal is more machinery than one destructive c
 | Member | What this plugin does with it |
 |---|---|
 | `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
+| `blobs()` | New in 0.8.0 — the scheduled recompute also **sweeps orphaned images**: it collects every `image.ref` the highlight docs still name, pages `blobs().list(…)`, and deletes the rest. Nothing on this platform collects orphans, and a blob outlives the document that named it, so without this every swapped picture leaks a file. The frontend deletes the ref it just stopped pointing at; this is the net under it, for the tab closed mid-edit and the `remove` that failed. See [below](#the-sweep-can-only-collect-what-the-backend-can-enumerate) for the constraint that shapes it. |
 | `schema()` | Not used — the manifest is the one place a plugin says which store it uses, and this one declares `"storage": "doc"`, so `schema()` is `null` by contract. It is `null` for every plugin that does not declare `storage.schema`; the doc store is the default and covers nearly everything, which is why the reference plugin uses it. Exercising `SchemaStore`/`Criteria` would mean changing what this plugin stores, not adding a call. Same story on the frontend — see `ctx.schema` above. |
 | `config()` | `refreshIntervalMinutes` — read and passed to `onSchedule`. Genuinely admin/podcaster-editable today via core's generic config-admin form (`PUT /api/admin/plugins/sample/config`) — see "Two ways to be configurable" below. |
 | `feeds()` | `episodesIn(Scope.site())` for the stats aggregate and the sitemap; `display(refId)` for the deep link's OG title/artwork. |
@@ -304,6 +311,76 @@ outside the `page` placement). Confirmed live: `/p/sample` (browse index), `/p/s
 (single highlight, real OG tags), and `/sitemap.xml` (lists every highlighted episode's deep link) all now
 return the right thing.
 
+## File uploads live behind a manifest declaration (SDK 0.8.0)
+Until 0.8.0 a plugin could display an image from *any* host on the web — core's CSP allows it once the
+host is declared for consent — and had no way to accept one from the site's own podcaster. The honest
+answer to "I drew a diagram" was "find an image host first". `ctx.blobs` closes that, and it is **opt-in**:
+
+```json
+"blobs": { "maxFileBytes": 5242880, "quotaBytes": 268435456,
+           "mimeTypes": ["image/png", "image/jpeg", "image/webp"] }
+```
+
+`ctx.blobs` (and the Java `ctx.blobs()`) is `null` without that block — same shape, and same reasoning, as
+`ctx.schema`. What you declare is what an operator sees you asking for, and **their numbers win**: they cap
+both ceilings and intersect the type list with the install's own. So a declared plugin can still be handed
+less than it asked for, or nothing at all, and this one is written to survive that — no upload UI appears,
+and a highlight that already names an image renders its alt text instead of a broken `<img>`.
+
+Four rules this plugin follows, all of them the kind you only learn by getting them wrong:
+
+- **Store the `ref`, never the URL.** `HighlightImage` keeps `{ ref, alt }`, and the view calls
+  `blobs.urlFor(ref)` at render time. The ref is the identity; the URL is derived, and the host is entitled
+  to change how it shapes one. A persisted URL trades a stable identifier for one that silently rots — and
+  a test asserts the saved document contains no derived URL anywhere.
+- **A refusal has to reach the person, not just the log.** Everywhere else in `Highlight.tsx` a failure is
+  logged and swallowed, because nothing the visitor does changes the outcome. An upload is the opposite:
+  the host refuses on size, then on the declared type, then on the *actual* type read from the leading
+  bytes (and SVG never, being a script container wearing an image's extension). The only person who can
+  supply a different file is the one standing at the file picker, so the message renders in the modal.
+- **Warn before the pick, not after.** The modal reads `quota()` on open and shows the remaining room and
+  the per-file ceiling, because the effective numbers are not the manifest's.
+- **Nothing collects orphans.** See the next section.
+
+The compact `card` element deliberately renders **no** image. That placement's rule (ARCHITECTURE §7.3) is
+a badge and nothing more, with full rendering reserved for `main` — a thumbnail per feed card would be the
+easy thing to add and the wrong one.
+
+### The sweep can only collect what the backend can enumerate
+A blob outlives the document that named it, so `SamplePlugin`'s scheduled pass deletes images no highlight
+points at any more. The interesting part is the precondition: **a sweep may only delete what it can prove
+is unreferenced**, so it may only run over scopes the backend can enumerate.
+
+It can enumerate two. `Scope.site()` is a singleton, and `FeedAccess.episodesIn(Scope.site())` yields every
+episode. There is no third — `FeedAccess` exposes no way to list *feeds*, so a feed-scope highlight is
+invisible from the backend. That single missing method is why this plugin **does not offer image upload at
+feed scope**: accepting one there would mean either leaking it forever or having the next sweep delete a
+live image out from under a podcaster.
+
+> **If you copy this:** widening where images may be attached means widening the sweep *first*. The failure
+> mode is silent, delayed, and destroys someone's upload. It is also why `rememberImageRef` reads the ref
+> defensively off the raw `JsonNode` — a shape it fails to understand must read as "no reference", which
+> costs a leaked file, rather than as "unreferenced", which costs a live one.
+
+## `links` vs `navigate` — two different questions
+0.8.0's `ctx.links` and 0.7.0's `ctx.route.navigate` look adjacent and are not interchangeable:
+
+| | `ctx.route.navigate(subpath)` | `ctx.links.episode(slug)` |
+|---|---|---|
+| **What it does** | Navigates, right now | Returns a string |
+| **Where it can point** | This plugin's `/p/sample/*` only — another plugin's route or a core one is *unnameable*, not merely refused | Core's own pages |
+| **In this plugin** | Browse-index rows and the deep-link back-link | The episode link beside each browse row, the "listen" link, the feed-scope season note |
+
+A browse-index row carries **both**, which is the clearest way to see the split: the label links into this
+plugin's own subtree and so goes through `navigate`; the "episode page" link beside it leaves for core and
+so can only ever be an `href`. Producing a link is not navigating — the visitor still clicks, and a real
+`href` is what middle-click, "open in new tab" and crawlers need.
+
+`links` grants no new capability; a plugin could always write any `href`. What it removes is the hardcoded
+`` `/episodes/${slug}` `` that quietly breaks when the host changes a route. The deep-link view passes the
+podcaster's own key moment as `{ t }`, which is core's timestamp deep link: it seeks the player on arrival
+and beats the listener's stored position for that navigation without overwriting it.
+
 ## Internal links go through `ctx.route.navigate` (SDK 0.7.0)
 Owning `/p/sample/*` means this plugin renders its own links into it: the browse index lists one per
 highlighted episode, and the deep-link view has a back-link to the page root. Until 0.7.0 those could only
@@ -429,6 +506,28 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.9.0** — SDK **0.8.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
+  so a `0.7.x` manifest stops loading the moment the host is on 0.8.0). Both additions are exercised, which
+  for one of them meant declaring something:
+  - **[`ctx.blobs`](#file-uploads-live-behind-a-manifest-declaration-sdk-080)** — highlights can now carry a
+    **podcaster-uploaded image**. This is the release's substantive half: before it, a plugin could render an
+    image from any host on the web and could not accept one from the site's own podcaster. The manifest
+    declares a `blobs` block (without it `ctx.blobs` is `null`, exactly like `ctx.schema`), the edit modal
+    uploads and shows `quota()` *before* a file is picked, the document stores only the **ref**, and refusals
+    render in the modal rather than only in the log — the person at the file picker is the only one who can
+    fix them.
+  - **The backend sweeps orphaned images** on its existing schedule (`ctx.blobs()`, the Java half). Nothing
+    on this platform collects orphans. The constraint that shapes it is worth reading before copying:
+    [a sweep can only collect what the backend can enumerate](#the-sweep-can-only-collect-what-the-backend-can-enumerate),
+    and because `FeedAccess` cannot list feeds, this plugin deliberately does **not** accept images at feed
+    scope.
+  - **[`ctx.links`](#links-vs-navigate-two-different-questions)** — `episode(slug, { t })` and
+    `feed(slug, { season })`, replacing the hardcoded `/episodes/${slug}` every plugin used to write. Not a
+    new capability, a relocation of knowledge: the host owns the shape of its own URLs. Non-nullable, so
+    leaving it unused would have been an outright hole in this repo's every-field claim.
+
+  `ctx.schema` remains the one field this plugin does not exercise, and now the only one — it is `null` for a
+  doc-store plugin and unreachable without changing what this one stores.
 - **2.8.0** — SDK **0.7.1** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
   so a `0.6.x` manifest stops loading the moment the host is on 0.7.x). The two additions in the 0.7 line:
   - **[`ctx.route.navigate(subpath, { replace })`](#internal-links-go-through-ctxroutenavigate-sdk-070)**

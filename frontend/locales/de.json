@@ -42,6 +42,17 @@
 
   "browse.title": "Hervorgehobene Episoden durchsuchen",
   "browse.back": "← Zurück zu allen Highlights",
+  "browse.episode": "Episodenseite",
+
+  "listen": "▶ Diese Episode anhören",
+  "listen.at": "▶ Ab {{time}} anhören",
+
+  "image.label": "Bild (PNG, JPEG oder WebP)",
+  "image.alt": "Bildbeschreibung (für Screenreader)",
+  "image.clear": "Bild entfernen",
+  "image.uploading": "Wird hochgeladen…",
+  "image.quota": "{{remaining}} Speicher übrig · bis zu {{max}} pro Datei",
+  "image.refused": "Upload abgelehnt: {{reason}}",
 
   "consent.summary": "Einwilligung: {{granted}}",
   "consent.none": "keine erteilt",

@@ -42,6 +42,17 @@
 
   "browse.title": "Browse highlighted episodes",
   "browse.back": "← Back to all highlights",
+  "browse.episode": "episode page",
+
+  "listen": "▶ Listen to this episode",
+  "listen.at": "▶ Listen from {{time}}",
+
+  "image.label": "Image (PNG, JPEG or WebP)",
+  "image.alt": "Image description (for screen readers)",
+  "image.clear": "Remove image",
+  "image.uploading": "Uploading…",
+  "image.quota": "{{remaining}} of storage left · up to {{max}} per file",
+  "image.refused": "Upload refused: {{reason}}",
 
   "consent.summary": "Consent: {{granted}}",
   "consent.none": "none granted",

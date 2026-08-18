@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
-import type { PluginContext, PluginRoute } from '@mosaicast/plugin-sdk';
+import type { BlobQuota, PluginContext, PluginRoute } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { makeI18n } from '../i18n';
@@ -13,10 +13,12 @@ import { FONT_STACKS, SETTINGS_PATH, type SiteSettings } from './AdminSettings';
 import {
   favouriteCountPath,
   favouriteDocPath,
+  formatBytes,
   formatTime,
   highlightDocPath,
   type FavouriteCount,
   type HighlightDoc,
+  type HighlightImage,
 } from '../highlight-doc';
 
 interface HighlightStats {
@@ -87,6 +89,13 @@ function renderMarkdown(markdown: string): string {
  *   consent request/grant/deny (inside {@link ConsentExtras}) — real signal from real user actions, not
  *   a demo-only call site.
  *
+ * - `blobs` (0.8.0) — an optional podcaster-uploaded image per highlight: `upload` from the edit modal,
+ *   `quota` shown *before* a file is picked, `remove` when one is replaced or dropped, and `urlFor` at
+ *   render time. Opt-in through the manifest's `blobs` block, and still guarded for `null` because an
+ *   operator can refuse it.
+ * - `links` (0.8.0) — `episode(slug, { t })` from the deep-link view and the browse index, and
+ *   `feed(slug, { season })` from the filter note. Strings for real `href`s, never navigation.
+ *
  * The one field it does not touch is `ctx.schema` (0.7.0), which is `null` for any plugin whose manifest
  * declares `"storage": "doc"` — as this one's does, the doc store being the default.
  *
@@ -148,6 +157,24 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   const [saving, setSaving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [removing, setRemoving] = useState(false);
+
+  // ctx.blobs (SDK 0.8.0): `null` unless the manifest declares a `blobs` block — and an operator can
+  // refuse the block on their install, so a *declared* plugin still has to survive `null`. Everything
+  // below treats file storage as an enhancement, never a requirement: no upload UI appears, and a
+  // highlight that already names an image renders its alt text instead of a broken <img>.
+  const blobs = ctx.blobs;
+  // Uploading is offered at episode and site scope only — *rendering* is not restricted, since a doc
+  // that already names an image should always display it. The reason is a backend constraint rather than
+  // a design preference: the scheduled sweep may only delete a blob it can prove nothing points at, so it
+  // may only run over scopes the backend can *enumerate*. `Scope.site()` is a singleton and
+  // `FeedAccess.episodesIn` lists every episode — but nothing in the contract lists feeds, so a
+  // feed-scope highlight is invisible from there. Accepting an image here would mean either leaking it
+  // forever or having the next sweep delete a live one. See SamplePlugin.sweepOrphanedImages.
+  const canAttachImage = blobs !== null && scopeType !== 'feed';
+  const [draftImage, setDraftImage] = useState<HighlightImage | undefined>(undefined);
+  const [quota, setQuota] = useState<BlobQuota | undefined>(undefined);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
 
   const loadHighlight = useCallback(() => {
     ctx.api
@@ -262,8 +289,62 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
     setDraft(highlight?.markdown ?? '');
     setDraftMoment(highlight?.momentSeconds != null ? String(highlight.momentSeconds) : '');
     setDraftSpoiler(highlight?.spoiler === true);
+    setDraftImage(highlight?.image);
+    setUploadError('');
     setConfirmingRemove(false);
     setModalOpen(true);
+    // Read the *effective* room before a file is picked, not after one is refused. The manifest states
+    // what this plugin asked for; the operator caps it and intersects the type list, so `quota()` is the
+    // only honest source — and the podcaster deserves to know the ceiling while choosing, not once the
+    // upload has already failed. Best-effort: a failure here costs a hint, not the ability to upload.
+    if (canAttachImage) blobs?.quota().then(setQuota).catch(() => setQuota(undefined));
+  }
+
+  /**
+   * `ctx.blobs.upload` — the one place in this component where an error must reach the **person**, not
+   * just `ctx.log`.
+   *
+   * Everywhere else here a failure is logged and swallowed (see {@link handleSave}), because nothing the
+   * visitor does can change the outcome. An upload refusal is the opposite: the host rejects on size,
+   * then on the declared type against the allow-list, then on the *actual* type read from the leading
+   * bytes — and the only person who can supply a different file is the one standing at the file picker.
+   * Swallowing it would leave them clicking Save on an image that was never stored.
+   *
+   * Replacing an image drops the previous one immediately: nothing else will ever point at it, and
+   * nothing collects orphans on this platform (the backend's scheduled sweep is the safety net for what
+   * this path misses, not a substitute for it — see SamplePlugin.sweepOrphanedImages).
+   */
+  async function handlePickImage(file: File) {
+    if (!blobs) return;
+    setUploading(true);
+    setUploadError('');
+    const replaced = draftImage?.ref;
+    try {
+      const stored = await blobs.upload(file);
+      // Keep the ref, never `urlFor(ref)` — see HighlightImage. Alt text carries over on replacement:
+      // swapping the picture rarely changes what it depicts, and losing it silently is an a11y regression.
+      setDraftImage({ ref: stored.ref, alt: draftImage?.alt ?? '' });
+      ctx.log('info', `highlight image uploaded (${stored.mime}, ${stored.size} bytes)`);
+      if (replaced && replaced !== stored.ref) await dropImage(replaced);
+      blobs.quota().then(setQuota).catch(() => undefined);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setUploadError(message);
+      ctx.log('warn', `highlight image upload refused: ${message}`);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  /** Deletes a blob this plugin no longer points at. Idempotent host-side, so a lost race is harmless. */
+  async function dropImage(ref: string) {
+    try {
+      await blobs?.remove(ref);
+    } catch (e) {
+      // Logged, not surfaced: the podcaster's edit succeeded and there is nothing for them to do about a
+      // failed cleanup. The backend sweep collects whatever this misses.
+      ctx.log('warn', `dropping blob ${ref} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async function handleSave() {
@@ -277,11 +358,16 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         markdown: draft,
         ...(Number.isFinite(momentSeconds) ? { momentSeconds } : {}),
         ...(draftSpoiler ? { spoiler: true } : {}),
+        ...(draftImage ? { image: draftImage } : {}),
       };
       await ctx.api.put(dataPath, body);
       setHighlight(body);
       setModalOpen(false);
       ctx.log('info', `highlight saved at ${dataPath}`);
+      // The doc is what decides an image is orphaned, so this waits until the write succeeded: dropping
+      // the blob first would leave a saved highlight pointing at nothing if the put then failed.
+      const dropped = highlight?.image?.ref;
+      if (dropped && dropped !== draftImage?.ref) await dropImage(dropped);
     } catch (e) {
       // Not rethrown: nothing awaits this handler's promise (it's a bare onClick), so a rethrow here would
       // only become an unhandled rejection. Logging is the whole error-reporting story for this action.
@@ -306,6 +392,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       setHighlight(undefined);
       setModalOpen(false);
       ctx.log('info', `highlight removed at ${dataPath}`);
+      // Same ordering as handleSave: the doc goes first, so a failed delete never strands a live
+      // highlight pointing at a blob that is already gone.
+      if (highlight?.image?.ref) await dropImage(highlight.image.ref);
     } catch (e) {
       // Same reasoning as handleSave: nothing awaits this handler, so logging is the error story. The
       // modal stays open with the confirm step still showing, so the podcaster can retry or back out.
@@ -339,6 +428,19 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         }
         .content :where(p) { margin: 0 0 0.5rem; }
         .content :where(p:last-child) { margin-bottom: 0; }
+        /* max-width, not width: a podcaster's upload is whatever their camera produced, and the slot it
+           lands in is a host region of unknown width. height:auto keeps the aspect ratio the host's own
+           reset would otherwise let the width override. */
+        .image {
+          display: block;
+          max-width: 100%;
+          height: auto;
+          margin: 0 0 0.5rem;
+          border-radius: 0.25rem;
+        }
+        .imageAlt { margin: 0 0 0.5rem; font-style: italic; color: var(--mc-text-muted); font-size: 0.85rem; }
+        .listen { margin: 0.5rem 0 0; font-size: 0.85rem; }
+        .listen a { color: var(--mc-accent); }
         .empty {
           margin: 0;
           color: var(--mc-text-muted);
@@ -363,7 +465,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .browse .browseTitle { margin: 0 0 0.25rem; font-size: 0.8rem; font-weight: 600; color: var(--mc-text); }
         .browse ul { margin: 0; padding-left: 1.1rem; }
         .browse a, .back { color: var(--mc-accent); }
+        .browse .episodeLink { margin-left: 0.4rem; font-size: 0.75rem; color: var(--mc-text-muted); }
         .back { display: inline-block; margin-bottom: 0.5rem; font-size: 0.8rem; }
+        .filterNote a { color: var(--mc-accent); }
         button {
           background: var(--mc-accent);
           color: var(--mc-accent-contrast);
@@ -412,9 +516,46 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           </button>
         </div>
       ) : highlight?.markdown ? (
-        <div className="content" dangerouslySetInnerHTML={{ __html: renderMarkdown(highlight.markdown) }} />
+        <>
+          {/* ctx.blobs (0.8.0). `urlFor` is derived here, at render time, from the stored ref — never
+              persisted. Served same-origin under /api/plugins/sample/blob/<ref>, so unlike the external
+              <img> in ConsentExtras this needs no declared CSP host and makes no consent decision.
+              `blobs` is null when the operator refused the block: the alt text still carries the meaning,
+              which is the whole reason it is stored beside the ref rather than derived from a filename. */}
+          {highlight.image &&
+            (blobs ? (
+              <img className="image" src={blobs.urlFor(highlight.image.ref)} alt={highlight.image.alt} />
+            ) : (
+              highlight.image.alt && <p className="imageAlt">{highlight.image.alt}</p>
+            ))}
+          <div className="content" dangerouslySetInnerHTML={{ __html: renderMarkdown(highlight.markdown) }} />
+        </>
       ) : (
         <p className="empty">{i18n.t('noHighlight')}</p>
+      )}
+
+      {/* ctx.links.episode (0.8.0). The deep-link view renders an episode's highlight on *this plugin's*
+          page, where there is no player and `ctx.player.seekTo` would have nothing to seek — so the way
+          out is a link to core's own episode page. `?t=` is the host's timestamp deep link: it seeks the
+          player on arrival and beats the listener's stored position for that navigation without
+          overwriting it, which turns the podcaster's key moment into a shareable entry point.
+
+          A plain `href`, deliberately: `route.navigate` is namespace-confined and *cannot* name a core
+          route, and producing a link is not navigating — the visitor still clicks. Before 0.8.0 this
+          meant hardcoding `/episodes/${slug}` and breaking whenever the host changed a route. */}
+      {inDeepLink && highlight?.markdown && (
+        <p className="listen">
+          <a
+            href={ctx.links.episode(
+              deepLinkSlug,
+              highlight.momentSeconds != null ? { t: highlight.momentSeconds } : undefined,
+            )}
+          >
+            {highlight.momentSeconds != null
+              ? i18n.t('listen.at', { time: formatTime(highlight.momentSeconds) })
+              : i18n.t('listen')}
+          </a>
+        </p>
       )}
 
       {isEpisode && !spoilerHidden && highlight?.momentSeconds != null && (
@@ -454,7 +595,19 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       )}
 
       {(scopeType === 'feed' || (isSite && !inDeepLink)) && season != null && (
-        <p className="filterNote">{i18n.t('filter.season', { season })}</p>
+        <p className="filterNote">
+          {scopeType === 'feed' ? (
+            // ctx.links.feed (0.8.0): the host's own filtered feed URL. This plugin consumes filter axes
+            // and never defines them (§6.1) — linking to core's rendering of the same axis is consuming.
+            // `String(season)`: the filter axis is numeric, the URL builder takes the axis *value* as a
+            // string, and the host owns the conversion in between rather than this plugin guessing a format.
+            <a href={ctx.links.feed(ctx.scope.id, { season: String(season) })}>
+              {i18n.t('filter.season', { season })}
+            </a>
+          ) : (
+            i18n.t('filter.season', { season })
+          )}
+        </p>
       )}
 
       {isSite && !inDeepLink && stats && (
@@ -473,6 +626,15 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               <li key={slug}>
                 <a {...internalLink(ctx.route, `${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`)}>
                   {ctx.episodeLabels?.[slug] ?? slug}
+                </a>
+                {/* Two links per row, and the pair is the lesson: the one above stays inside this
+                    plugin's own subtree and so goes through `route.navigate`; this one leaves for a core
+                    page and so can only ever be an `href` built by `ctx.links`. No `?t=` here — the
+                    index knows slugs, not each episode's key moment, and fetching every highlight to
+                    decorate a list would be a request per row. The deep-link view has the doc, so that
+                    is where the timestamp link lives. */}
+                <a className="episodeLink" href={ctx.links.episode(slug)}>
+                  {i18n.t('browse.episode')}
                 </a>
               </li>
             ))}
@@ -536,6 +698,42 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               font: inherit;
               width: 6rem;
             }
+            .modal input[type="text"] {
+              background: var(--mc-bg);
+              color: var(--mc-text);
+              border: 1px solid var(--mc-border);
+              border-radius: 0.25rem;
+              padding: 0.3rem;
+              font: inherit;
+              flex: 1;
+              min-width: 0;
+            }
+            .modal .imageField {
+              display: flex;
+              flex-direction: column;
+              gap: 0.4rem;
+              padding: 0.5rem;
+              border: 1px solid var(--mc-border);
+              border-radius: 0.25rem;
+            }
+            .modal .imageField .quota { margin: 0; font-size: 0.75rem; color: var(--mc-text-muted); }
+            /* Not muted, and not the accent either: a refusal is the one message in this dialog the
+               podcaster has to act on, so it gets the host's own error-ish weight rather than blending
+               into the hints above it. */
+            .modal .imageField .uploadError {
+              margin: 0;
+              font-size: 0.8rem;
+              font-weight: 600;
+              color: var(--mc-accent-2);
+            }
+            .modal .imageField .preview {
+              max-width: 100%;
+              height: auto;
+              max-height: 8rem;
+              object-fit: contain;
+              border-radius: 0.25rem;
+              align-self: flex-start;
+            }
             .modal .actions {
               display: flex;
               align-items: center;
@@ -585,6 +783,72 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                 placeholder={i18n.t('markdownPlaceholder')}
                 onChange={(e) => setDraft(e.target.value)}
               />
+              {/* ctx.blobs upload. Absent entirely when the operator refused the manifest block, and at
+                  feed scope — see `canAttachImage`. Either way a text-only editor beats a control that
+                  cannot work or whose result the backend would later delete. */}
+              {canAttachImage && blobs && (
+                <div className="imageField">
+                  <label className="field">
+                    {i18n.t('image.label')}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      disabled={uploading}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        // Clear the input so re-picking the *same* file after a refusal still fires
+                        // `change` — otherwise a podcaster who fixes the file outside the browser and
+                        // picks it again gets silence.
+                        e.target.value = '';
+                        if (file) void handlePickImage(file);
+                      }}
+                    />
+                  </label>
+                  {/* `accept` above is a filter in the picker, not a guarantee: the host re-checks the
+                      declared type against the allow-list and then the real type from the leading bytes.
+                      SVG is never accepted at all — a script container wearing an image's extension. */}
+                  {quota && (
+                    <p className="quota">
+                      {i18n.t('image.quota', {
+                        remaining: formatBytes(quota.quotaBytes - quota.usedBytes),
+                        max: formatBytes(quota.maxFileBytes),
+                      })}
+                    </p>
+                  )}
+                  {uploading && <p className="quota">{i18n.t('image.uploading')}</p>}
+                  {/* The refusal reaches the person, not only ctx.log — see handlePickImage. */}
+                  {uploadError && (
+                    <p className="uploadError" role="alert">
+                      {i18n.t('image.refused', { reason: uploadError })}
+                    </p>
+                  )}
+                  {draftImage && (
+                    <>
+                      <img className="preview" src={blobs.urlFor(draftImage.ref)} alt={draftImage.alt} />
+                      <label className="field">
+                        {i18n.t('image.alt')}
+                        <input
+                          type="text"
+                          value={draftImage.alt}
+                          onChange={(e) => setDraftImage({ ...draftImage, alt: e.target.value })}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          // Only detaches it from the draft. The blob itself is dropped by handleSave,
+                          // once the doc that stopped pointing at it has actually been written.
+                          setDraftImage(undefined);
+                          setUploadError('');
+                        }}
+                      >
+                        {i18n.t('image.clear')}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
               {isEpisode && (
                 <>
                   <label className="field">

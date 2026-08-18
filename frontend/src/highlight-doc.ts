@@ -9,6 +9,21 @@
 
 import { SELF_SCOPE_ID } from '@mosaicast/plugin-sdk';
 
+/**
+ * A podcaster-uploaded image attached to a highlight (SDK 0.8.0, `ctx.blobs`).
+ *
+ * **`ref` is the identity, and the only thing stored.** The URL is derived from it by
+ * `ctx.blobs.urlFor(ref)` at render time; the host is entitled to change how it shapes those URLs and is
+ * not entitled to invalidate what a plugin wrote down. Persisting a URL trades a stable identifier for
+ * one that silently rots.
+ */
+export interface HighlightImage {
+  /** The host-assigned blob id. Opaque — never parsed, never constructed, never a URL. */
+  ref: string;
+  /** Alt text the podcaster typed. Empty means decorative, which is a claim only they can make. */
+  alt: string;
+}
+
 /** One highlight, as written to `data/{scopeType}/{scopeId}/highlight` by the edit modal. */
 export interface HighlightDoc {
   markdown: string;
@@ -16,6 +31,9 @@ export interface HighlightDoc {
   momentSeconds?: number;
   /** Podcaster opt-in: hide this highlight behind a reveal gate until `ctx.progress` shows listening has started. */
   spoiler?: boolean;
+  /** Optional uploaded image (SDK 0.8.0). Absent for a text-only highlight, and for any install whose
+   *  operator refused this plugin's `blobs` block — see {@link HighlightImage}. */
+  image?: HighlightImage;
 }
 
 /**
@@ -65,4 +83,25 @@ export function formatTime(totalSeconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return `${minutes}:${String(rest).padStart(2, '0')}`;
+}
+
+/**
+ * `5242880` -> `"5 MB"`. For showing a `BlobQuota` to a podcaster deciding whether a file will fit.
+ *
+ * Decimal units, because that is what a file manager shows them; a remaining-space hint that disagrees
+ * with the number beside the file they are looking at is worse than no hint. Clamps at zero — a quota
+ * already exceeded should read `0 B`, not a negative.
+ */
+export function formatBytes(bytes: number): string {
+  const value = Math.max(0, bytes);
+  if (value < 1000) return `${Math.round(value)} B`;
+  const units = ['kB', 'MB', 'GB'];
+  let scaled = value / 1000;
+  let unit = 0;
+  while (scaled >= 1000 && unit < units.length - 1) {
+    scaled /= 1000;
+    unit += 1;
+  }
+  // One decimal below 10 (`1.4 MB` is useful), none above (`268 MB` beats `268.4 MB` for a ceiling).
+  return `${scaled < 10 ? scaled.toFixed(1) : Math.round(scaled)} ${units[unit]}`;
 }

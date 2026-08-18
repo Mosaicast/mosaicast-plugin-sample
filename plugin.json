@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.8.0",
-  "platformApi": "0.7.1",
+  "version": "2.9.0",
+  "platformApi": "0.8.0",
   "name": "Sample",
   "backend": {
     "basePath": "/api/plugins/sample",
@@ -24,6 +24,11 @@
     "readableBy": "anonymous",
     "writableBy": "podcaster",
     "backendOwned": ["stats", "favourites"]
+  },
+  "blobs": {
+    "maxFileBytes": 5242880,
+    "quotaBytes": 268435456,
+    "mimeTypes": ["image/png", "image/jpeg", "image/webp"]
   },
   "config": {
     "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }
