@@ -4,8 +4,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { makeMockCtx, makeMockConsent } from '@mosaicast/plugin-sdk/testing';
-import type { MockApiClient } from '@mosaicast/plugin-sdk/testing';
+import { makeMockCtx, makeMockConsent, makeMockBlobs } from '@mosaicast/plugin-sdk/testing';
+import type { MockApiClient, MockBlobClient } from '@mosaicast/plugin-sdk/testing';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { flush } from '../test-utils';
 import { Highlight } from './Highlight';
@@ -940,5 +940,249 @@ describe('Highlight — ctx.route.navigate (SPA navigation inside /p/sample/, SD
     // '' is the plugin's own page root: navigate's argument is always relative to /p/sample/.
     expect(ctx.navigations).toEqual([{ subpath: '', replace: false }]);
     expect(handled).toBe(true);
+  });
+});
+
+describe('Highlight — ctx.links (linking to core pages, SDK 0.8.0)', () => {
+  const hrefsOf = (root: ParentNode) =>
+    Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'));
+
+  it('links each browse-index row to core’s episode page as well as to its own deep link', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      episodes: ['ep-1'],
+      episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    // Both links, and the pair is the point: one stays in the plugin's subtree, one leaves for core.
+    expect(hrefsOf(container)).toContain('/p/sample/highlight/ep-1');
+    expect(hrefsOf(container)).toContain(ctx.links.episode('ep-1'));
+  });
+
+  it('carries the podcaster’s key moment into core’s ?t= deep link from the single-highlight view', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      route: { path: 'highlight/ep-1' },
+      episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
+      apiResponses: {
+        'get data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 724 },
+      },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const listen = container.querySelector('.listen a') as HTMLAnchorElement;
+    // Built by the host, not by this plugin concatenating `/episodes/${slug}?t=`.
+    expect(listen.getAttribute('href')).toBe(ctx.links.episode('ep-1', { t: 724 }));
+    expect(listen.textContent).toContain('12:04');
+  });
+
+  it('omits ?t= when the highlight names no key moment', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      route: { path: 'highlight/ep-1' },
+      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const listen = container.querySelector('.listen a') as HTMLAnchorElement;
+    expect(listen.getAttribute('href')).toBe(ctx.links.episode('ep-1'));
+  });
+
+  it('links the feed-scope season note to core’s filtered feed', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'feed', id: 'main' },
+      filter: { current: () => ({ season: 2 }), onChange: () => () => {} },
+      apiResponses: { 'get data/feed/main/highlight': { markdown: 'Season two' } },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const note = container.querySelector('.filterNote a') as HTMLAnchorElement;
+    // The axis is numeric on ctx.filter and a string in the URL builder — the host owns that conversion.
+    expect(note.getAttribute('href')).toBe(ctx.links.feed('main', { season: '2' }));
+  });
+});
+
+describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => {
+  const PNG = 'image/png';
+
+  /** A stand-in for what an `<input type="file">` hands over. */
+  function file(name: string, mime: string, bytes: number): File {
+    return new File([new Uint8Array(bytes)], name, { type: mime });
+  }
+
+  /** Mounts a podcaster view with blob storage and opens the editor. */
+  async function openEditorWith(blobs: MockBlobClient, overrides: Record<string, unknown> = {}) {
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: { id: 'u1', role: 'podcaster' },
+      blobs,
+      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } },
+      ...overrides,
+    });
+    const container = mount(ctx);
+    await flush();
+    const modal = await openEditor(container);
+    return { ctx, container, modal };
+  }
+
+  /** Picks a file through the modal's file input, the way a podcaster would. */
+  async function pick(modal: ParentNode, f: File) {
+    const input = modal.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [f], configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await flush();
+    });
+  }
+
+  afterEach(async () => {
+    // The modal portals to document.body, so an open one would leak into the next test.
+    const modal = findModalShadowRoot();
+    if (modal) await clickButton(modal, 'Cancel');
+  });
+
+  it('uploads a picked image and stores the ref — never the URL — in the highlight doc', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const { ctx, modal } = await openEditorWith(blobs);
+
+    await pick(modal, file('cover.png', PNG, 1024));
+    expect(blobs.uploads).toEqual([{ filename: 'cover.png', mime: PNG, size: 1024 }]);
+
+    await clickButton(modal, 'Save');
+
+    const put = ctx.api.calls.find((c) => c.method === 'put')!;
+    const body = put.body as { image?: { ref: string; alt: string } };
+    expect(body.image?.ref).toBe(blobs.stored[0].ref);
+    // The whole point of storing a ref: no derived URL is persisted anywhere in the document.
+    expect(JSON.stringify(body)).not.toContain(blobs.urlFor(blobs.stored[0].ref));
+  });
+
+  it('renders a stored image through urlFor, derived at render time', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const stored = await blobs.upload(file('cover.png', PNG, 512));
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      blobs,
+      apiResponses: {
+        'get data/episode/ep-1/highlight': {
+          markdown: 'The drop',
+          image: { ref: stored.ref, alt: 'A waveform' },
+        },
+      },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const img = container.querySelector('img.image') as HTMLImageElement;
+    expect(img.getAttribute('src')).toBe(blobs.urlFor(stored.ref));
+    expect(img.getAttribute('alt')).toBe('A waveform');
+  });
+
+  it('shows the refusal to the podcaster when the file is too large', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG], maxFileBytes: 1000 });
+    const { modal } = await openEditorWith(blobs);
+
+    await pick(modal, file('huge.png', PNG, 5000));
+
+    // Reaching the DOM is the assertion that matters: only the person at the file picker can fix this,
+    // so a ctx.log line alone would be a silent failure.
+    expect(modal.querySelector('.uploadError')!.textContent).toContain('Upload refused');
+    expect(blobs.stored).toHaveLength(0);
+  });
+
+  it('shows the refusal when the type is outside the manifest’s allow-list', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const { modal } = await openEditorWith(blobs);
+
+    await pick(modal, file('diagram.gif', 'image/gif', 100));
+
+    expect(modal.querySelector('.uploadError')).not.toBeNull();
+    expect(blobs.stored).toHaveLength(0);
+  });
+
+  it('shows the refusal when the bytes contradict the declared type', async () => {
+    // Stands in for the host reading the leading bytes — the check neither double reimplements.
+    const blobs = makeMockBlobs({ mimeTypes: [PNG], rejectContent: ['not-really.png'] });
+    const { modal } = await openEditorWith(blobs);
+
+    await pick(modal, file('not-really.png', PNG, 100));
+
+    expect(modal.querySelector('.uploadError')).not.toBeNull();
+    expect(blobs.stored).toHaveLength(0);
+  });
+
+  it('drops the previous blob when an image is replaced', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const { modal } = await openEditorWith(blobs);
+
+    await pick(modal, file('first.png', PNG, 100));
+    const first = blobs.stored[0].ref;
+    await pick(modal, file('second.png', PNG, 200));
+
+    expect(blobs.removals).toContain(first);
+  });
+
+  it('drops the blob after the highlight that pointed at it is removed', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const stored = await blobs.upload(file('cover.png', PNG, 128));
+    const { modal } = await openEditorWith(blobs, {
+      apiResponses: {
+        'get data/episode/ep-1/highlight': {
+          markdown: 'The drop',
+          image: { ref: stored.ref, alt: 'A waveform' },
+        },
+      },
+    });
+
+    // Two-step confirm: the first click arms it, the second is the irreversible one.
+    await clickButton(modal, 'Remove');
+    await clickButton(modal, 'Yes, remove');
+
+    expect(blobs.removals).toContain(stored.ref);
+  });
+
+  it('degrades to text when the operator refused the blobs block (ctx.blobs === null)', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: { id: 'u1', role: 'podcaster' },
+      blobs: null,
+      apiResponses: {
+        'get data/episode/ep-1/highlight': {
+          markdown: 'The drop',
+          image: { ref: 'blob-1', alt: 'A waveform' },
+        },
+      },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    // No broken <img> pointing nowhere; the alt text still carries the meaning.
+    expect(container.querySelector('img.image')).toBeNull();
+    expect(container.querySelector('.imageAlt')!.textContent).toBe('A waveform');
+
+    const modal = await openEditor(container);
+    expect(modal.querySelector('input[type="file"]')).toBeNull();
+    await clickButton(modal, 'Cancel');
+  });
+
+  it('offers no upload at feed scope, because the backend sweep cannot enumerate feeds', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: [PNG] });
+    const ctx = makeMockCtx({
+      scope: { type: 'feed', id: 'main' },
+      user: { id: 'u1', role: 'podcaster' },
+      blobs,
+      apiResponses: { 'get data/feed/main/highlight': { markdown: 'Season two' } },
+    });
+    const container = mount(ctx);
+    await flush();
+    const modal = await openEditor(container);
+
+    expect(modal.querySelector('input[type="file"]')).toBeNull();
+    await clickButton(modal, 'Cancel');
   });
 });

@@ -3,6 +3,7 @@
 
 package dev.mosaicast.plugin.sample;
 
+import dev.mosaicast.plugin.api.BlobInfo;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.OgMeta;
@@ -14,11 +15,14 @@ import dev.mosaicast.plugin.api.ShareMetadataProvider;
 import dev.mosaicast.plugin.api.SitemapProvider;
 import dev.mosaicast.plugin.api.SitemapUrl;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 import org.pf4j.Extension;
 import tools.jackson.databind.JsonNode;
@@ -54,6 +58,12 @@ import tools.jackson.databind.JsonNode;
  *       <em>caller's</em> partition, so no browser can count anybody but itself. It is also the only way
  *       the number is <em>true</em>: the owner id on each {@link dev.mosaicast.plugin.api.OwnedDocEntry}
  *       is host-resolved from the partition the document sits in, never a value a client supplied.
+ *   <li><strong>Collect orphaned uploads</strong> (SDK 0.8.0): the same scheduled pass deletes images no
+ *       highlight points at any more via {@link PluginContext#blobs()} — see
+ *       {@link #sweepOrphanedImages(PluginContext, Set)}. Nothing on this platform collects orphans, a blob
+ *       outlives the document that named it, and only this plugin knows which those are. The frontend drops
+ *       the ref it just stopped pointing at; this is the net under it, and being a backend job is not
+ *       incidental — it is the only place a whole-store view exists.
  *   <li><strong>Serve deep links</strong> ({@code /p/sample/highlight/<episodeSlug>}, ARCHITECTURE §6.4):
  *       this class also implements the two optional extension points a plugin may add on top of {@link
  *       PluginBackend} — {@link ShareMetadataProvider} (OpenGraph tags for link scrapers) and {@link
@@ -77,10 +87,11 @@ import tools.jackson.databind.JsonNode;
  * dereferencing it: core looks extension points up independently of {@code register()}, so a lookup that
  * happens first must degrade to no OG tags / no sitemap entries, not throw.
  *
- * <p><strong>{@link PluginContext#schema()} is intentionally never called here.</strong> {@code
- * plugin.json} declares {@code "storage": "doc"}, and core's own 0.4.0 plan keeps {@code schema()}
- * returning {@code null} regardless of what a manifest declares — 0.4.0 explicitly allows that. There is
- * nothing to wire up until core ships schema storage; {@link #recomputeHighlightStats(PluginContext)}
+ * <p><strong>{@link PluginContext#schema()} is intentionally never called here.</strong> The manifest is the
+ * one place a plugin says which store it uses, and {@code plugin.json} declares {@code "storage": "doc"}, so
+ * {@code schema()} is {@code null} by contract. The doc store is the default and covers nearly everything,
+ * which is why the reference plugin uses it; reaching {@code SchemaStore} would mean changing what this
+ * plugin stores, not adding a call. {@link #recomputeHighlightStats(PluginContext)}
  * below uses {@link dev.mosaicast.plugin.api.DocStore#query(Scope, String)} instead, this plugin's one use
  * of the Jackson-3-shaped {@link JsonNode} the doc store hands back from a prefix scan.
  */
@@ -106,6 +117,9 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
 
     /** Doc key holding {@link FavouriteCount} at an episode scope. */
     private static final String FAVOURITE_COUNT_KEY = "favourites";
+
+    /** Page size for walking this plugin's blobs during the orphan sweep; the host caps what it honours. */
+    private static final int BLOB_SWEEP_PAGE_SIZE = 100;
 
     /** Longest excerpt of a highlight's markdown carried into {@link OgMeta#description()}. */
     private static final int DESCRIPTION_EXCERPT_LENGTH = 160;
@@ -185,6 +199,11 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     private static void recomputeHighlightStats(PluginContext ctx) {
         List<String> episodeIds = ctx.feeds().episodesIn(Scope.site());
         Map<String, Integer> favourites = tallyFavourites(ctx);
+        // Every blob ref a highlight still points at, gathered as we already walk the docs. Feeding the
+        // sweep from the same pass is what keeps the two consistent: a ref added between "collect" and
+        // "delete" would otherwise be a live image with nothing claiming it.
+        Set<String> referencedImages = new HashSet<>();
+        collectImageRef(ctx.store().query(Scope.site(), "highlight"), referencedImages);
         int highlighted = 0;
         int withMoment = 0;
         int pruned = 0;
@@ -221,13 +240,93 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 if (node.path("momentSeconds").isNumber()) {
                     withMoment++;
                 }
+                rememberImageRef(node, referencedImages);
             }
         }
+        sweepOrphanedImages(ctx, referencedImages);
         ctx.logger().info(
                 "recomputed highlight stats: {}/{} episodes highlighted ({} with a key moment, {} empty doc(s) pruned,"
                         + " {} favourite(s) across all visitors)",
                 highlighted, episodeIds.size(), withMoment, pruned, totalFavourites);
         ctx.store().put(Scope.site(), "stats", new HighlightStats(episodeIds.size(), highlighted, withMoment, totalFavourites));
+    }
+
+    /** Adds the {@code image.ref} of every entry in {@code entries} to {@code refs}. */
+    private static void collectImageRef(List<DocEntry> entries, Set<String> refs) {
+        for (DocEntry entry : entries) {
+            rememberImageRef(entry.value(), refs);
+        }
+    }
+
+    /**
+     * Records the blob ref a highlight document points at, if it has one.
+     *
+     * <p>Read defensively off the {@code JsonNode} rather than through a typed binding: this walks
+     * documents an older or newer build of the plugin may have written, and the sweep below <em>deletes</em>
+     * based on the answer. A shape this method fails to understand must read as "no ref", which costs a
+     * leaked file; guessing wrong in the other direction costs a podcaster their image.
+     */
+    private static void rememberImageRef(JsonNode highlight, Set<String> refs) {
+        JsonNode ref = highlight.path("image").path("ref");
+        if (ref.isString() && !ref.stringValue().isBlank()) {
+            refs.add(ref.stringValue());
+        }
+    }
+
+    /**
+     * Deletes uploaded images no highlight points at any more (SDK 0.8.0, {@link PluginContext#blobs()}).
+     *
+     * <p><strong>Nothing on this platform collects orphans.</strong> A blob outlives the document that
+     * named it and only this plugin knows which those are, so the choice is between sweeping here and
+     * leaking a file every time a podcaster swaps a picture. The frontend deletes the ref it just stopped
+     * pointing at, which handles the ordinary case; this is the net under it, for the tab closed
+     * mid-edit and the {@code remove} call that failed. Being a scheduled backend job is not incidental —
+     * it is the only place a whole-store view exists.
+     *
+     * <p><strong>Why this is safe to run, and the constraint that makes it so.</strong> A sweep may only
+     * delete what it can prove is unreferenced, so it may only run over scopes this backend can
+     * <em>enumerate</em>: {@link Scope#site()} is a singleton, and {@link dev.mosaicast.plugin.api.FeedAccess#episodesIn}
+     * yields every episode. There is deliberately no third case — {@code FeedAccess} exposes no way to
+     * list feeds, so a feed-scope highlight is invisible from here, and this plugin therefore never
+     * <em>writes</em> an image at feed scope (see the upload gate in {@code Highlight.tsx}). That pairing
+     * is the whole lesson for anyone copying this: <em>what your backend can enumerate bounds what it can
+     * safely garbage-collect</em>. Widen where images may be attached and you must widen this first, or
+     * the next tick quietly deletes them.
+     */
+    private static void sweepOrphanedImages(PluginContext ctx, Set<String> referenced) {
+        var blobs = ctx.blobs();
+        if (blobs == null) {
+            // Null unless the manifest declares a `blobs` block — and an operator may refuse it on their
+            // install even though this one declares it. No storage, nothing to sweep.
+            return;
+        }
+        // Page the whole list *before* deleting anything. Removing entries from a collection being paged
+        // shifts the rest forward, so a cursor that advanced between deletions would step over exactly as
+        // many blobs as it removed — and they would survive until a later tick happened to catch them.
+        // Two phases, no such interaction.
+        List<String> orphans = new ArrayList<>();
+        for (int page = 0; ; page++) {
+            List<BlobInfo> batch = blobs.list(page, BLOB_SWEEP_PAGE_SIZE);
+            for (BlobInfo blob : batch) {
+                if (!referenced.contains(blob.ref())) {
+                    orphans.add(blob.ref());
+                }
+            }
+            if (batch.size() < BLOB_SWEEP_PAGE_SIZE) {
+                break;
+            }
+        }
+        int deleted = 0;
+        for (String ref : orphans) {
+            // Idempotent, so losing a race with the frontend's own cleanup is not an error — it reports
+            // false and the counter simply does not move.
+            if (blobs.delete(ref)) {
+                deleted++;
+            }
+        }
+        if (deleted > 0) {
+            ctx.logger().info("swept {} orphaned highlight image(s)", deleted);
+        }
     }
 
     /**

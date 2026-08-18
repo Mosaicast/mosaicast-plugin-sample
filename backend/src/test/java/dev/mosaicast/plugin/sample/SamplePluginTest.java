@@ -17,11 +17,14 @@ import dev.mosaicast.plugin.sample.SamplePlugin.HighlightStats;
 import dev.mosaicast.plugin.testkit.FakeFeedAccess;
 import dev.mosaicast.plugin.testkit.FakePluginContext;
 import dev.mosaicast.plugin.testkit.InMemoryDocStore;
+import dev.mosaicast.plugin.testkit.InMemoryPluginBlobs;
 import dev.mosaicast.plugin.testkit.MapPluginConfig;
 import dev.mosaicast.plugin.testkit.RecordingLogger.LogEvent;
+import java.io.ByteArrayInputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -375,5 +378,85 @@ class SamplePluginTest {
         assertEquals(
                 List.of(new SitemapUrl("/p/sample/highlight/ep-1", null), new SitemapUrl("/p/sample/highlight/ep-3", null)),
                 new SamplePlugin().urls());
+    }
+
+    /** A context whose blob store accepts PNGs, for the orphan-sweep tests below. */
+    private static FakePluginContext contextWithBlobs(InMemoryPluginBlobs blobs, String... episodeIds) {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null, blobs);
+    }
+
+    /** Stores one small PNG and hands back its ref. */
+    private static String storePng(InMemoryPluginBlobs blobs, String filename) {
+        return blobs.put(filename, "image/png", new ByteArrayInputStream(new byte[] {1, 2, 3})).ref();
+    }
+
+    private static InMemoryPluginBlobs pngBlobs() {
+        return new InMemoryPluginBlobs().withMimeTypes(Set.of("image/png"));
+    }
+
+    @Test
+    void sweepsUploadedImagesNoHighlightPointsAtAnyMore() {
+        InMemoryPluginBlobs blobs = pngBlobs();
+        String live = storePng(blobs, "kept.png");
+        String orphan = storePng(blobs, "dropped.png");
+        FakePluginContext ctx = contextWithBlobs(blobs, "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "still here", "image", Map.of("ref", live, "alt", "a waveform")));
+
+        new SamplePlugin().register(ctx);
+
+        // The referenced one survives; the one nothing names is collected. Nothing else does this — a blob
+        // outlives the document that pointed at it and only this plugin knows which those are.
+        assertTrue(blobs.stat(live).isPresent(), "an image a highlight still names must survive the sweep");
+        assertTrue(blobs.stat(orphan).isEmpty(), "an image nothing points at must be swept");
+    }
+
+    @Test
+    void keepsImagesReferencedFromTheSiteScopeHighlight() {
+        InMemoryPluginBlobs blobs = pngBlobs();
+        String siteImage = storePng(blobs, "site.png");
+        FakePluginContext ctx = contextWithBlobs(blobs, "ep-1");
+        ctx.store().put(Scope.site(), "highlight",
+                Map.of("markdown", "site-wide", "image", Map.of("ref", siteImage, "alt", "")));
+
+        new SamplePlugin().register(ctx);
+
+        // Regression guard for the sweep's own precondition: it walks Scope.site() as well as every
+        // episode, so a site-scope image must not read as unreferenced.
+        assertTrue(blobs.stat(siteImage).isPresent(), "a site-scope highlight's image must survive the sweep");
+    }
+
+    @Test
+    void treatsAnUnreadableImageShapeAsNoReferenceRatherThanGuessing() {
+        InMemoryPluginBlobs blobs = pngBlobs();
+        String stored = storePng(blobs, "orphan.png");
+        FakePluginContext ctx = contextWithBlobs(blobs, "ep-1");
+        // A shape this plugin does not understand: `image` present but carrying no usable `ref`.
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "text", "image", Map.of("alt", "no ref here")));
+
+        new SamplePlugin().register(ctx);
+
+        // Reading it as "no reference" is the safe direction only because the blob it fails to protect is
+        // one nothing can render anyway; the document itself is untouched.
+        assertTrue(blobs.stat(stored).isEmpty());
+        assertTrue(ctx.store().get(Scope.episode("ep-1"), "highlight", Highlight.class).isPresent()
+                || !ctx.store().query(Scope.episode("ep-1"), "highlight").isEmpty(),
+                "the highlight doc itself must not be pruned by the image sweep");
+    }
+
+    @Test
+    void doesNothingWhenTheInstallHasNoBlobStorage() {
+        // ctx.blobs() is null when the manifest declares no `blobs` block, or an operator refused it.
+        // The whole recompute pass must still run rather than NPE on the sweep.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("no images here"));
+
+        new SamplePlugin().register(ctx);
+
+        assertEquals(
+                Optional.of(new HighlightStats(1, 1, 0, 0)),
+                ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 }
