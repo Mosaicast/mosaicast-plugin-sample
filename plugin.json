@@ -1,8 +1,11 @@
 {
   "id": "sample",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "platformApi": "0.8.0",
   "name": "Sample",
+  "license": "Apache-2.0",
+  "author": "The Mosaicast Authors",
+  "homepage": "https://github.com/Mosaicast/mosaicast-plugin-sample",
   "backend": {
     "basePath": "/api/plugins/sample",
     "extensions": ["dev.mosaicast.plugin.sample.SamplePlugin"]

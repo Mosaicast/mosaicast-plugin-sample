@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Mosaicast Authors
+#
+# Copied verbatim (bar this header) from core's `dev/templates/release-plugin.yml`. This repo is the
+# reference plugin, so the copy is deliberately unmodified: what `sample` does is what a plugin author
+# copies, and every line below that looks arbitrary is load-bearing — see the two notes further down.
+#
+# On a published release it builds the plugin and attaches `plugin.tgz` to that release, then appends the
+# tarball's SHA-256 to the release notes.
+#
+# **The asset name is fixed on purpose.** `scripts/install-plugin.sh` resolves `owner/repo@tag` straight to
+#   https://github.com/<owner>/<repo>/releases/download/<tag>/plugin.tgz
+# which is a plain redirect: no API call, no token, no JSON parsing in a shell script, and the identical URL
+# shape works for `releases/latest/download/…`. Rename the asset and installs by `owner/repo` stop working.
+#
+# The published SHA-256 is what lets an operator write the form we actually recommend:
+#   MOSAICAST_PLUGINS=owner/repo@v1.2.3#sha256:<the digest below>
+# A plugin runs in-process and unsandboxed (ARCHITECTURE §7.1), so publishing the digest is the difference
+# between an operator being able to pin what they audited and having to trust whatever the tag points at now.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # attaching the asset and editing the release body
+
+jobs:
+  package:
+    name: Build & attach plugin.tgz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # The plugin's own build, unchanged — whatever produces dist/ locally produces it here.
+      - name: Build
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build.sh
+
+      - name: Package dist/ as plugin.tgz
+        id: package
+        run: |
+          set -euo pipefail
+          test -f dist/plugin.json || { echo "::error::build.sh produced no dist/plugin.json"; exit 1; }
+
+          # Tag and manifest must agree, or an operator pinning `@v1.2.3` installs something that calls
+          # itself something else — the same class of mistake core's tag-vs-version check catches.
+          manifest_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dist/plugin.json | head -1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$manifest_version" != "$tag_version" ]; then
+            echo "::error::tag is $GITHUB_REF_NAME but plugin.json says $manifest_version"
+            exit 1
+          fi
+
+          # Contents at the archive root, no wrapper directory. The installer tolerates either, but this is
+          # the shape it unpacks straight into the plugins folder.
+          tar -czf plugin.tgz -C dist .
+          echo "sha256=$(sha256sum plugin.tgz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Attach to the release and publish the checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" plugin.tgz --clobber
+          gh release view "$TAG" --json body --jq .body > notes.md
+          {
+            printf '\n\n---\n\n### Install\n\n```\nMOSAICAST_PLUGINS=%s@%s#sha256:%s\n```\n' \
+              "$GITHUB_REPOSITORY" "$TAG" "$SHA256"
+          } >> notes.md
+          gh release edit "$TAG" --notes-file notes.md

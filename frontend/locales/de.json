@@ -20,8 +20,8 @@
   "stat.favourites": "· {{count}} Favorit(en) von Hörer:innen",
 
   "moment.label": "Schlüsselmoment (Sekunden in die Episode)",
-  "moment.jump": "▶ Springe zu {{time}}",
-  "moment.passed": "✓ gehört",
+  "moment.jump": "Springe zu {{time}}",
+  "moment.passed": "gehört",
 
   "spoiler.markLabel": "Als Spoiler markieren (verstecken, bis diese:r Besucher:in zu hören begonnen hat)",
   "spoiler.hidden": "Spoilerschutz: Höre diese Episode an, um das Highlight anzuzeigen.",
@@ -29,23 +29,23 @@
 
   "planned.badge": "Kommende Episode — noch keine Spoiler",
 
-  "fav.off": "☆ Zu Favoriten",
-  "fav.on": "★ Favorisiert",
+  "fav.off": "Zu Favoriten",
+  "fav.on": "Favorisiert",
   "fav.count": "{{count}} Hörer:innen haben das favorisiert",
   "fav.anonymous": "Melde dich an, um dieses Highlight zu favorisieren",
 
-  "card.label": "✨ Highlight",
+  "card.label": "Highlight",
   "card.moment": "Schlüsselmoment bei {{time}}",
   "card.spoiler": "Spoiler",
 
   "filter.season": "Gefiltert nach Staffel {{season}}",
 
   "browse.title": "Hervorgehobene Episoden durchsuchen",
-  "browse.back": "← Zurück zu allen Highlights",
+  "browse.back": "Zurück zu allen Highlights",
   "browse.episode": "Episodenseite",
 
-  "listen": "▶ Diese Episode anhören",
-  "listen.at": "▶ Ab {{time}} anhören",
+  "listen": "Diese Episode anhören",
+  "listen.at": "Ab {{time}} anhören",
 
   "image.label": "Bild (PNG, JPEG oder WebP)",
   "image.alt": "Bildbeschreibung (für Screenreader)",

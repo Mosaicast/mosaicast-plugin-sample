@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { makeI18n } from '../i18n';
+import { ICON_CSS, Icon } from '../icons';
 import { formatTime, highlightDocPath, type HighlightDoc } from '../highlight-doc';
 
 /**
@@ -49,6 +50,7 @@ export function HighlightCard({ ctx }: { ctx: PluginContext }) {
   return (
     <span className="card">
       <style>{`
+        ${ICON_CSS}
         .card {
           display: inline-flex;
           align-items: center;
@@ -56,10 +58,16 @@ export function HighlightCard({ ctx }: { ctx: PluginContext }) {
           font-size: 0.75rem;
           color: var(--mc-text-muted);
         }
-        .card .label { color: var(--mc-accent); font-weight: 600; }
+        .card .label { color: var(--mc-accent); font-weight: 600; display: inline-flex; align-items: center; gap: 0.25rem; }
         .card .sep { opacity: 0.6; }
       `}</style>
-      <span className="label">{i18n.t('card.label')}</span>
+      {/* The badge's mark used to be a literal ✨ in the catalogs. A host icon instead: it is `1em`, so it
+          scales with this card's deliberately small type without naming a size, and it re-themes with the
+          accent beside it rather than rendering as whatever emoji font the visitor's platform ships. */}
+      <span className="label">
+        <Icon name="pin" />
+        {i18n.t('card.label')}
+      </span>
       {highlight.spoiler === true ? (
         <>
           <span className="sep">·</span>

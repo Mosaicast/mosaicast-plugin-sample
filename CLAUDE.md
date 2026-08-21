@@ -26,6 +26,8 @@ Vite does not type-check — `npm run typecheck` (`tsc --noEmit`) is the only th
 - Migrations exclusively via Flyway.
 - **Tests are part of the work** (see DoD in the BRIEF, ARCHITECTURE §13.5; plugins test against the SDK test kit).
 - **CI:** create and maintain `.github/workflows/ci.yml` (build + tests on every PR) as soon as the build exists; the Definition of Done includes green CI.
+- **Releases:** `.github/workflows/release.yml` is core's template, copied unmodified. The asset name `plugin.tgz` is load-bearing (the installer resolves `owner/repo@tag` straight to it), and the tag must equal `plugin.json`'s `version` — the workflow fails the release otherwise. Keep `plugin.json` / `backend/build.gradle.kts` / `frontend/package{,-lock}.json` versions in lockstep.
+- **Icons come from the host** as `--mc-icon-*` (§12.3), used as a `mask-image` with a blank-SVG fallback — an unresolved token paints a solid square, not nothing. Never put a glyph in a translated string; never declare into the `--mc-*` namespace.
 - **Document public APIs** (Javadoc/TSDoc); take SDK signatures from the built SDK docs, don't guess (§3.5).
 - **Sign off commits** (`git commit -s`, DCO).
 - **SPDX header in EVERY new source file**:
