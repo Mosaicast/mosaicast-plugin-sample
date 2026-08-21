@@ -685,6 +685,12 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
             button, .imageField .quota, .imageField .uploadError {
               display: inline-flex; align-items: center; gap: 0.35rem;
             }
+            /* The refusal is the one message here that wraps — the host's 415 names the type it sniffed,
+               which runs to two lines in a modal this width. Centring an icon against a two-line block
+               floats it into the gutter between the lines, so this one aligns to the first line instead
+               and nudges down by the difference between the 1em box and the text's cap height. */
+            .imageField .uploadError { align-items: flex-start; }
+            .imageField .uploadError .mcIcon { margin-top: 0.15em; }
             .overlay {
               position: fixed;
               inset: 0;
