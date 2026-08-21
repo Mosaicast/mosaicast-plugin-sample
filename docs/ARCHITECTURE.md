@@ -157,9 +157,14 @@ The shell is an SPA, but link scrapers (WhatsApp/Discord/Facebook) **do not run 
 - **OgResolver per scope:** episode → episode title + episode image (fallback: podcast cover); feed/site → cover + site name + description; season → "site name – Season N". The resolver reads the **query params** (§6.1), so a shared filtered view gets matching meta.
 - **Plugin deep links:** the host reserves **`/p/{pluginId}/*`** and passes the subpath to the plugin as `ctx.route` (read-only + `onChange`). That makes plugin content (e.g. a wiki page) linkable and shareable at all.
 - **`ShareMetadataProvider`** (optional backend extension point, §7.4): when serving a `/p/{pluginId}/…` URL, core asks the plugin for title/description/image; no provider (or no match) → site-level OG fallback. The wiki implements it in v1 as the reference.
+- **Timestamped episode links:** `/episodes/{slug}?t=754` addresses a **moment**, and the shell hands the position to the player as its pending seek. The grammar accepts what people paste — bare seconds, `12:34`, `1:02:03`, `1h02m03s`, `90m` — and an unparsable value is **dropped rather than an error**, since the meaning of the URL is its path and `t` only enriches it. One grammar, implemented on both sides (shell + server) and held to a shared table of cases: the shell decides where playback lands, the server decides what a card says, and a link that previews as one moment and plays another is worse than one carrying no timestamp.
+- **`rel=canonical` and `og:url` may differ, and here they do.** They answer different questions: canonical is *which URL to index*, and a timestamp is a position within one page rather than a page of its own — so canonical stays the bare episode and the filter-normalizing rules above are untouched. `og:url` is *what was shared*; emitting the canonical form there would let a scraper normalize a shared moment back to the top of the episode, which is precisely the link the sharer did not send. Only a parsed-and-re-serialized value is echoed, so the parameter never reaches the page as text.
+- **Preview tags are written for messengers, not only for search.** Beyond title/description/image: an episode declares `og:type: article` with `article:published_time`, plus `og:audio`(`:type`) when the enclosure's format is unambiguous from its URL; every view carries `og:site_name`, `og:locale` and `og:image:alt`. Image *dimensions* are deliberately absent — artwork comes from the feed as a third-party URL whose size the host does not know.
 
 ### 6.5 Listening progress (core service)
 Per-user playback progress is a **core service, not a plugin concern**: the player stores position per episode (anonymous → localStorage only; logged-in → server-side), **resumes playback** where the user left off, and exposes read access to plugins via `ctx.progress` (e.g. bingo's spoiler protection). One source of truth for "has this user heard this episode".
+
+**An explicit `t` (§6.4) wins over stored progress for that navigation, and does not overwrite it.** Someone following a timestamped link asked for that spot; someone who was partway through the episode did not ask to lose their place, and a link they were sent should not be able to move it. The stored position is only rewritten once playback has actually advanced past the shared one — the difference between having looked and having listened — and a manual scrub ends the hold at once, being a deliberate statement about where the listener is.
 
 ### 6.6 SEO & crawlers
 Same machinery as §6.4 (the server knows episodes and can ask plugins), extended four ways:
@@ -176,7 +181,12 @@ Same machinery as §6.4 (the server knows episodes and can ask plugins), extende
 ### 7.1 Structure
 A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web Component bundle) + `plugin.json`. Loaded from a plugins folder at startup. **Trusted, in-process, no sandboxing** — the admin carries responsibility, also for 3rd-party.
 
-**Configurable plugins path (no forced folder layout):** core reads the plugins folder from `MOSAICAST_PLUGINS_DIR` (env/property, default `./plugins`). Plugins know **nothing** about it — their `build.sh` only writes to their own local `dist/` and never touches core. Distribution (`dist/` → plugins folder) is a **separate, manual step**; location is free to choose (sibling folder, central folder, Docker volume). An optional `install.sh` in a plugin may shortcut the copy if `MOSAICAST_PLUGINS_DIR` is set — never as a requirement.
+**Configurable plugins path (no forced folder layout):** core reads the plugins folder from `MOSAICAST_PLUGINS_DIR` (env/property, default `./plugins`). Plugins know **nothing** about it — their `build.sh` only writes to their own local `dist/` and never touches core. Distribution (`dist/` → plugins folder) stays a **separate step**; location is free to choose (sibling folder, central folder, Docker volume). An optional `install.sh` in a plugin may shortcut the copy if `MOSAICAST_PLUGINS_DIR` is set — never as a requirement.
+
+**Installing by spec (no registry).** Copying by hand remains valid and always will, but it is not the only path: `scripts/install-plugin.sh` resolves `owner/repo[@tag][#sha256:…]`, a tarball URL or a local file, and in a container `MOSAICAST_PLUGINS` does the same **before the JVM starts** — plugins are read once at startup, so anything arriving later would stay invisible until the next restart. **GitHub Releases are the index**: a fixed `plugin.tgz` asset reached through the plain `releases/…/download/` redirect, which is what keeps this an API call, a token and a JSON parser lighter than a registry would be. A central registry is not ruled out, but nothing here needs one yet.
+- The installed folder name comes from the manifest's own `id`, never from the repo name — a folder that disagrees with its id is rejected at load anyway, so guessing would only move the error somewhere less obvious.
+- An unresolvable spec **fails the container** rather than booting without it: an instance that looks healthy while silently missing a plugin the operator asked for surfaces later as a broken page instead of the deploy error it is. Restarts are idempotent — an already-installed spec is recognised without re-downloading.
+- **Pin a tag *and* a checksum.** Plugins are trusted, in-process and unsandboxed (above); making installation one env var away does not change that, so the documented default is the form an operator can audit. The checksum is the only integrity control this model has.
 
 > **Known rough edge:** PF4J classloading inside a Spring Boot fat JAR is fiddly. Keeping plugins Spring-free (plain PF4J extensions against the SDK) is the deliberate mitigation; still budget real time for the classloader setup in core (E5) instead of fighting it late.
 
@@ -187,6 +197,9 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
   "version": "1.0.0",
   "platformApi": "1.x",
   "name": "Bingo",
+  "license": "AGPL-3.0-or-later",
+  "author": "The Mosaicast Authors",
+  "homepage": "https://github.com/Mosaicast/mosaicast-plugin-bingo",
   "backend":  { "basePath": "/api/plugins/bingo", "extensions": ["dev.mosaicast.plugin.bingo.BingoPlugin"] },
   "frontend": { "entry": "bingo.es.js", "elements": ["bingo-episode-card", "bingo-host-board"] },
   "slots": [
@@ -203,8 +216,10 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
 - **`slots`**: scope + Web Component + `placement` (named region) + `visibleTo` (minimum role) + optional `order`.
 - **`storage`**: `"doc"` = generic JSONB store. For the wiki, a schema declaration instead (§7.6).
 - **`data`**: the access floor of the generic data surface (§7.6) — `readableBy` / `writableBy`, each `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`. **Declared, never derived:** the host does not infer it from slots. An absent block defaults `readableBy` to the *write* floor, not to anonymous — a **behaviour change**: a plugin that relied on an anonymous slot making its data anonymously readable must now declare `readableBy: "anonymous"` to keep it. A slot's `visibleTo` governs **rendering only**. Neither floor applies to the `USER` scope (§7.6). `backendOwned` names the keys only the plugin's **backend** may write — an exact key, a `*`-terminated prefix, or the bare `*`; clients may still read them (subject to `readableBy`) and a client `PUT`/`DELETE` is a **403** the host words apart from the role-floor one, so an author can tell which rule refused them. It is the only **per-key** rule on this surface; see §7.6 for why it is needed and what it does not do.
+- **`blobs`**: opt-in file storage (§11.1) — `maxFileBytes`, `quotaBytes`, `mimeTypes`. Declared, never derived, like `data`: what a plugin may write to disk should be readable off its manifest. Absent = no file storage at all. The operator caps every number and intersects the type list with the install's own, so a plugin is granted the smaller of the two rather than rejected for asking. `image/svg+xml` is refused at load — SVG is never storable (§12.2).
 - **`consent`**: third-party services the plugin loads — one declaration each (`id`, `name`, `provider`, `category`, `privacyUrl`, `hosts`, `thirdCountryTransfer`, `storage[]`); the visitor decides per *category*, and `hosts` doubles as the CSP allow-list (§12.5). Omit the key entirely when the plugin loads nothing third-party.
 - **`config`**: declared fields are rendered by core as a **generic admin form** (respecting `editableBy`) — plugins never build their own config UI.
+- **`license` / `author` / `homepage` / `attribution`**: credit, shown on the public About page (§12.6). All optional and **never validated** — a plugin written before these existed must keep loading, and an oddly-spelled licence is still a working plugin; credit is not a correctness concern. `attribution` is separate from `homepage` because "where this lives" and "who deserves credit for it" are not the same link: a plugin that borrows data, artwork or an upstream library should be able to say so without giving up its own page. Purely additive in both directions — the host ignores unknown manifest fields and there is no manifest type in the SDK — so **no `platformApi` bump**, which matters because that check is an exact `major.minor` match and a bump would reject every installed plugin until each one re-released.
 
 ### 7.3 Slots & placements
 - Regions (`top`, `card`, `main`, `sidebar`, `player`, `feed`, `site`, `admin`, …) are defined by the **host shell** per view. Plugins only target existing names; an unknown region → startup rejection. The **`feed`** and **`site`** regions are the scope panels' plugin spaces (§6.1): `feed` on a feed tab, `site` on the All tab.
@@ -217,6 +232,7 @@ public interface PluginBackend extends ExtensionPoint { void register(PluginCont
 public interface PluginContext {
     DocStore     store();    // (scope, key) → JSON, hard-scoped
     SchemaStore  schema();   // only present if the manifest declares schema
+    PluginBlobs  blobs();    // only present if the manifest declares `blobs` (§11.1); null otherwise
     PluginConfig config();
     FeedAccess   feeds();
     void onSchedule(Duration every, Runnable task); // ShedLock-wrapped
@@ -257,11 +273,13 @@ interface PluginContext {
   user:     { id: string; role: Role } | null;
   api:      PluginApiClient;          // calls /api/plugins/<id>/* with auth token
   schema:   SchemaClient | null;      // read-only; null unless the manifest declares a schema (§7.6)
+  blobs:    BlobClient | null;        // upload/list/delete; null unless the manifest declares `blobs` (§11.1)
   consent:  { has(cat: string): boolean; onChange(cb: () => void): void };
   filter:   { current(): FilterState; onChange(cb: (f: FilterState) => void): void }; // read-only
   player:   { currentTime(): number; seekTo(s: number): void; on(ev, cb): void };     // for sync plugins
   route:    { path: string; onChange(cb: (p: string) => void): void;     // subpath under /p/<pluginId>/ (§6.4)
               navigate(subpath: string, opts?: { replace?: boolean }): void };  // within that subtree only
+  links:    { episode(slug, opts?): string; feed(slug, opts?): string }; // host URL shapes, strings only
   locale:   { current(): string; onChange(cb: (l: string) => void): void }; // active UI locale (§12.7)
   progress: { get(episodeId: string): Promise<number | null> };          // core listening progress, seconds (§6.5)
   theme:    ThemeTokens;              // host colors/spacing as CSS variables
@@ -369,14 +387,45 @@ interface BlobStore {
     BlobRef put(String namespace, String key, InputStream data, String mime);
     BlobContent get(BlobRef ref);              // STREAMING, not "all bytes"
     void delete(BlobRef ref);
-    String urlFor(BlobRef ref, AccessContext ctx); // direct/presigned URL or own endpoint
+    List<BlobMetadata> list(String namespace, int page, int size);  // a backend answers for its own
+    long count(String namespace);
+    long usedBytes(String namespace);          // called on every upload — quota (§11.1)
+    int  deleteNamespace(String namespace);    // purge (§7.8)
+    Optional<String> directUrl(BlobRef ref, AccessContext ctx); // empty = serve it yourself
     BlobCapabilities capabilities();           // supportsRange, supportsPresignedUrls
 }
 ```
 - **Streaming-first + range requests** from day one (a 5 KB favicon like a 100 MB audio file).
-- **Namespace routing:** `branding/*` may stay in Postgres forever, `audio/*` later S3/CDN. One interface, one backend per namespace.
+- **Namespace routing:** `branding/*` may stay in Postgres forever, `audio/*` later S3/CDN. One interface, one backend per namespace, chosen in configuration (`mosaicast.blobs.namespaces`) — exact namespace first, then longest `/` prefix, so `plugin` covers every plugin without naming plugins that are not installed yet. A rule naming a backend that is not registered **fails startup**: falling through to the default would put files in a store nobody chose, with the symptom appearing long after the cause.
+- **A backend is self-contained.** It answers for its own namespaces — listing, count, total size, delete-all — rather than sharing an index in Postgres. Two stores of the same truth can disagree and nothing can then say which is right, and the alternative was worse in practice: the plugin surface reached past the interface into `BlobRepository`, so a non-Postgres backend would have accepted uploads and reported an empty library with zero usage, leaving the quota unenforced and nothing failing loudly.
+  - The cost is that each backend owes those answers *well*, and that is the backend's problem rather than the interface's: Postgres sums an indexed column, a filesystem walks a directory, an object store keeps a counter instead of paginating its own prefix on every upload. `usedBytes` is called on every write, which is the constraint that shapes the choice.
+  - Listing is **offset-paged**, matching the plugin HTTP surface. That is a real constraint on an object store, which pages by continuation token; a media library is browsed from its first page, so walking to a deep one is a cost such a backend may cap. Moving to cursor paging is an SDK contract change and belongs with the backend that needs it, not before.
+- **`directUrl` is the seam that makes an object store worth having.** A backend that can serve bytes without the app in the path says so; Postgres returns empty and callers serve the bytes themselves. Proxying every byte gives up most of the reason to move them out of the database. It is also where tier-gated audio (§10) signs a URL *after* the entitlement check, which is why it takes an `AccessContext` and cannot be cached per blob.
 - v1: `PostgresBlobStore` (BYTEA). Later: `S3BlobStore`, `FilesystemBlobStore` (config switch).
 - Tier-gated audio (future): expiring presigned URLs only after the entitlement check (`AccessContext`).
+
+### 11.1 Plugin file storage
+
+Branding was the only customer for a long time, and the asymmetry that left was hard to defend: a plugin's CSP allows an image from **any** host on the web (§12.5), and there was no way to accept one from the site's own podcaster. A wiki wants diagrams; "find an image host first" is not an answer. So plugins get a scoped surface over the same store — the namespace `plugin/{id}`, computed by the host from the plugin id and never passed in, which is the property `SchemaStore` has for tables and `ctx.route.navigate` has for URLs.
+
+```text
+POST   /api/plugins/{id}/blob         multipart; → { ref, url, mime, size, filename, updatedAt }
+GET    /api/plugins/{id}/blob         paged, newest first
+GET    /api/plugins/{id}/blob/quota   used / allowed, as this install sees it
+GET    /api/plugins/{id}/blob/{ref}   streaming; Range + ETag
+DELETE /api/plugins/{id}/blob/{ref}   idempotent
+```
+
+- **Declared, never derived.** A manifest `blobs` block (`maxFileBytes`, `quotaBytes`, `mimeTypes`) is the opt-in, so a plugin's appetite for disk is readable by whoever installs it. Absent → `ctx.blobs` is `null` and every path is a **404**, indistinguishable from an unknown plugin, exactly as the schema surface answers a doc-store plugin. Reachable through `ctx.blobs` (TS) and `ctx.blobs()` (Java) — the latter mostly so a backend can collect the orphans nothing else collects.
+- **Who decides how much room a plugin gets, in order:** an **admin's grant** in the plugin settings UI, else the **manifest's** ask, else the install's **default** — then clamped by an optional operator **hard ceiling**, which is unset by default. The quota endpoint is the only honest source for what came out of that.
+  - An admin's grant **replaces** the manifest's ask rather than being minimised with it. A manifest says what a plugin's author guessed it would need on an install they have never seen; an admin raising it is looking at this install's real usage. Minimised, a grant of 2 GB against a manifest asking 256 MB would yield 256 MB and no explanation — a control that appears to work and does nothing. The manifest still decides when nobody has said otherwise, and remains what an installing operator reads to see what a plugin is asking for.
+  - The **hard ceiling** exists because ADMIN is a role inside the application (§8.5) while the properties are infrastructure. Where those are not the same person, an operator needs a bound the UI cannot cross; where they are, leaving it unset is right. A grant past it is **clamped, not refused**, and the clamped value is what is stored — an admin is never shown a number that means something else.
+  - **The MIME allow-list is not grantable.** No admin decision widens it, because what a file may *be* is a security question (§12.2) rather than a capacity one.
+  - Storage is **per plugin**: a wiki accumulating diagrams and a bingo plugin storing nothing have no reason to share a ceiling, and "the wiki has outgrown its space" is an ordinary operational event rather than a redeploy.
+- **Writes are the point here, and that is why this differs from §7.6.** The case against schema writes over HTTP is that no plugin code runs at request time to enforce a relational invariant. A file has none, so `data.writableBy` plus a quota is the whole authorization story. Reads take `data.readableBy` — one floor pair, three surfaces. `backendOwned` does not apply: it reserves *keys*, and a caller never names one — a ref is a UUID the host mints per upload, so an upload can never overwrite an existing file, including another tenant's.
+- **What the bytes say is what gets stored**, in this order: size, the declared type, the *actual* type read from the leading bytes, then the quota. One shared sniffer serves branding and plugins, and **SVG has no case in it** — that is what makes it unstorable rather than merely undeclared (§12.2). Refusals are **415** (type) and **413** (size or quota), worded apart because the fixes differ.
+- **Purge removes files** alongside documents and schema tables (§7.8), matched on the namespace exactly rather than on a name prefix.
+- Blobs are served **same-origin** under `/api/`, so a plugin rendering its own upload needs no CSP host and makes no consent decision — which an external image URL cannot say. This is the answer to the asymmetry above, not merely a workaround for it.
 
 ---
 
@@ -391,6 +440,11 @@ Via `BlobStore` (namespace `branding/`). Served at `/branding/logo`, `/branding/
 
 ### 12.3 Light/dark + seed generator
 - **Semantic tokens** as CSS custom properties: `--mc-bg, --mc-surface, --mc-text, --mc-text-muted, --mc-accent, --mc-accent-contrast, --mc-border` (+ accent-2). Light/dark = two value sets, `data-theme` on the root. **Shell AND plugins read the same properties** → they re-theme automatically.
+- **Icons ride the same channel: `--mc-icon-*`.** The shell's icon set is generated from a whitelist and a deliberate subset is published as custom properties, so a plugin's Web Component draws the shell's icons with **no SDK import, no `platformApi` bump and no version skew** — a plugin built against an older SDK picks up an icon added here the day it lands. Consumed as a **mask**, never as `background-image`, so the icon takes the caller's own colour and re-themes with everything else:
+  ```css
+  mask-image: var(--mc-icon-close); mask-size: contain; background: currentColor;
+  ```
+  The published names are a **contract**, exactly like the colour tokens: add freely, rename never. The set is deliberately provisioned ahead of demand — a plugin builds against a *released* core, so an icon that is not already published is one its author cannot add without waiting for a core release.
 - **Seed:** the admin sets **one accent**, the system generates the rest. **OKLCH** (perceptually uniform) + **WCAG contrast clamp** (text/bg ≥ 4.5:1), so no unreadable theme can result.
 - **No theme flash:** a tiny inline script in `index.html` sets `data-theme` + accent synchronously from the site payload before first paint.
 - **Previews:** the branding panel shows the logo on a light AND a dark swatch; the theme seed renders live as the accent is dragged. Both client-side.
@@ -410,6 +464,14 @@ Publicly operated sites need jurisdiction-specific legal documents (e.g. Germany
 - A page can carry a **role marker** (`privacy`, `imprint`, `terms`, …); the consent service (§12.5) links to the page marked `privacy`.
 - Markdown is rendered sanitized (same care as wiki content).
 - Docs note for operators: German operators typically need Impressum + Datenschutzerklärung. **Mosaicast ships the mechanism, not legal texts** — bundling texts would be false safety. *(Not legal advice.)*
+
+**`/about` — what this is, what it runs, what it is built on.** A shipped route, not an admin-authored page, because a visitor to a *bare* install is the one most likely to ask "what is this site?" and least likely to find an answer. Four sections, each taking up the question the one before it raises:
+1. **This instance** — the operator's own words. It leads because someone arrived at *this podcast's site*, not at a piece of software; opening with a paragraph about the platform answers a question nobody asked.
+2. **What Mosaicast is** — fixed, translated text with the running version and a link to the source. This is also where the AGPL's obligation to offer source becomes something a network user can actually act on, rather than a clause with nowhere to click.
+3. **Plugins** — what this install runs, with whatever credit each declared (§7.2). Anonymous: what an install runs and under what terms is not privileged information.
+4. **Built with** — the third-party work the project stands on, generated from one source shared with the repository's notices file so the two cannot drift. Curated and deliberately generous rather than a transitive dependency dump, and it credits build and test tooling too.
+
+Every section is **absent-tolerant on its own**, so an install with no plugins, no About text and no legal pages still renders. The operator's blurb reuses this mini-CMS under an `about` slug — that buys per-locale markdown, sanitising, locale fallback and the existing editor for nothing, where a `SiteConfig` column could not do per-locale text without reinventing the translation table. It is **not** a legal page, so its role marker keeps it out of the footer's legal group; it gets its own link there and in the info menu.
 
 ### 12.7 Internationalization (i18n)
 Built in from the start so the project can grow international and translation is an easy first contribution.
