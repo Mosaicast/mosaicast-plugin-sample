@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { makeI18n } from '../i18n';
+import { ICON_CSS, Icon } from '../icons';
 
 /** Site-wide look-and-feel for every `Highlight` tile, stored at `data/site/main/settings`. */
 export interface SiteSettings {
@@ -71,6 +72,8 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
   return (
     <div className="settings">
       <style>{`
+        ${ICON_CSS}
+        .settings .title, .settings button { display: inline-flex; align-items: center; gap: 0.35rem; }
         .settings { background: var(--mc-surface); color: var(--mc-text); border: 1px solid var(--mc-border);
           border-radius: 0.5rem; padding: 0.75rem 1rem; font-family: system-ui, sans-serif; display: flex;
           flex-direction: column; gap: 0.5rem; }
@@ -84,7 +87,10 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
         .settings .saved { font-size: 0.75rem; color: var(--mc-text-muted); }
       `}</style>
 
-      <p className="title">{i18n.t('settings.title')}</p>
+      <p className="title">
+        <Icon name="settings" />
+        {i18n.t('settings.title')}
+      </p>
       <p className="hint">{i18n.t('settings.hint')}</p>
 
       <label>
@@ -117,6 +123,7 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
       </label>
 
       <button type="button" onClick={handleSave} disabled={saving}>
+        <Icon name="save" />
         {saving ? i18n.t('saving') : i18n.t('settings.save')}
       </button>
       {saved && <span className="saved">{i18n.t('settings.saved')}</span>}

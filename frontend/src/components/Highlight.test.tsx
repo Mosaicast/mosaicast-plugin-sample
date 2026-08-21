@@ -439,9 +439,11 @@ describe('Highlight — site scope', () => {
 describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.5.0)', () => {
   const HIGHLIGHT = { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } };
 
-  /** Finds the favourite toggle by its star, whichever state it is in. */
+  /** Finds the favourite toggle in either state. `aria-pressed` is the only marker it always carries —
+   *  its label changes with the state, and since the icons became `--mc-icon-*` masks (core 0.6.15) the
+   *  star is a CSS background rather than text, so nothing about it is greppable from the DOM. */
   const favButton = (root: ParentNode) =>
-    Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.includes('★') || b.textContent?.includes('☆'));
+    Array.from(root.querySelectorAll('button')).find((b) => b.hasAttribute('aria-pressed'));
 
   it('writes this visitor’s mark to data/user/me/… — never to an address naming the user', async () => {
     const ctx = makeMockCtx({
@@ -452,7 +454,7 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
 
     const container = mount(ctx);
     await flush();
-    await clickButton(container, '☆ Favourite this');
+    await clickButton(container, 'Favourite this');
 
     // `me`, not `u1`: the host resolves the partition from the session and answers 400 to any other id.
     // The episode is in the key, because a user partition is flat.
@@ -473,7 +475,7 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
     await flush();
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('true');
 
-    await clickButton(container, '★ Favourited');
+    await clickButton(container, 'Favourited');
 
     expect(ctx.api.calls).toContainEqual({ method: 'delete', path: 'data/user/me/fav:ep-1' });
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('false');
@@ -523,7 +525,7 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
 
     const container = mount(ctx);
     await flush();
-    await clickButton(container, '☆ Favourite this');
+    await clickButton(container, 'Favourite this');
 
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('false');
     expect(ctx.logs).toContainEqual({

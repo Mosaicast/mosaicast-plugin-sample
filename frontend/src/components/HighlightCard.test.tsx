@@ -31,7 +31,7 @@ describe('HighlightCard — the episode/card compact badge', () => {
     const container = mount(cardCtx({ markdown: 'A long highlight body that belongs on the detail page' }));
     await flush();
 
-    expect(container.textContent).toContain('✨ Highlight');
+    expect(container.textContent).toContain('Highlight');
   });
 
   it('never renders the markdown body — full rendering belongs to the main placement', async () => {

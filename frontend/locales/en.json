@@ -20,8 +20,8 @@
   "stat.favourites": "· {{count}} favourite(s) from listeners",
 
   "moment.label": "Key moment (seconds into the episode)",
-  "moment.jump": "▶ Jump to {{time}}",
-  "moment.passed": "✓ played",
+  "moment.jump": "Jump to {{time}}",
+  "moment.passed": "played",
 
   "spoiler.markLabel": "Mark as spoiler (hide until this visitor has started listening)",
   "spoiler.hidden": "Spoiler protection: start listening to this episode to reveal the highlight.",
@@ -29,23 +29,23 @@
 
   "planned.badge": "Upcoming episode — no spoilers yet",
 
-  "fav.off": "☆ Favourite this",
-  "fav.on": "★ Favourited",
+  "fav.off": "Favourite this",
+  "fav.on": "Favourited",
   "fav.count": "{{count}} listener(s) favourited this",
   "fav.anonymous": "Sign in to favourite this highlight",
 
-  "card.label": "✨ Highlight",
+  "card.label": "Highlight",
   "card.moment": "key moment at {{time}}",
   "card.spoiler": "spoiler",
 
   "filter.season": "Filtered to season {{season}}",
 
   "browse.title": "Browse highlighted episodes",
-  "browse.back": "← Back to all highlights",
+  "browse.back": "Back to all highlights",
   "browse.episode": "episode page",
 
-  "listen": "▶ Listen to this episode",
-  "listen.at": "▶ Listen from {{time}}",
+  "listen": "Listen to this episode",
+  "listen.at": "Listen from {{time}}",
 
   "image.label": "Image (PNG, JPEG or WebP)",
   "image.alt": "Image description (for screen readers)",

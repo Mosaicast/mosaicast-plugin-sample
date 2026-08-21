@@ -45,15 +45,15 @@ hardcoded episode URL every plugin used to write by hand.
 | `episodes` / `episodeLabels` | Site scope renders a "browse highlighted episodes" index, linking each episode's public slug to its own deep link. |
 | `episode?.status` | An "Upcoming episode — no spoilers yet" badge while `PLANNED`. |
 | `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). Also decides whether the favourite toggle is offered at all: an anonymous visitor has no `user` partition, so the component shows a sign-in hint instead of making a request the host would answer with 401. |
-| **the `user` storage scope** | New in 2.6.0 — a signed-in visitor's own "★ Favourited" mark at `data/user/me/fav:<episodeSlug>`, written with `ctx.api.put`/withdrawn with `ctx.api.delete`. `user` is a `DataScopeType`, **not** a slot scope: `ctx.scope` stays `episode`, only the storage address changes. The public tally beside it comes from a *different*, backend-written doc — see [below](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050). |
+| **the `user` storage scope** | New in 2.6.0 — a signed-in visitor's own "Favourited" mark at `data/user/me/fav:<episodeSlug>`, written with `ctx.api.put`/withdrawn with `ctx.api.delete`. `user` is a `DataScopeType`, **not** a slot scope: `ctx.scope` stays `episode`, only the storage address changes. The public tally beside it comes from a *different*, backend-written doc — see [below](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050). |
 | `api` | All four verbs of the host's generic doc-store surface: `get` (the highlight doc, the backend-computed stats doc, the site-wide settings doc, and read-only another episode's highlight in the deep-link view), `put` (save), and `delete` (the edit modal's **Remove**, behind a two-step confirm). |
 | `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
 | `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
-| `player` | An optional per-highlight "key moment" (seconds): a "▶ Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "✓ played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
+| `player` | An optional per-highlight "key moment" (seconds): a "Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
 | `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). Both links *into* that subtree — the browse index's per-episode entries and the back-link out of a deep link — keep their `href` **and** hand a plain left-click to `ctx.route.navigate` (0.7.0), which is SPA navigation rather than a full document load: see [below](#internal-links-go-through-ctxroutenavigate-sdk-070). |
 | `locale` | `createPluginI18n` + `locales/{en,de}.json`, reacting to `ctx.locale.onChange`; the translator instance is memoized and its `dispose()` called on cleanup (a leak `createPluginI18n`'s own docs flag as worth fixing once `onChange` returns something to unsubscribe with). |
 | `progress` | An **opt-in** spoiler gate: a highlight the podcaster explicitly marks `spoiler: true` in the edit modal stays hidden behind a "Show anyway" button until `ctx.progress.get()` reports this visitor has actually started the episode. Not access control — a courtesy, same spirit as bingo's spoiler protection. |
-| `theme` | Unchanged from 2.0: injected as `--mc-*` custom properties by `defineMosaicastElement`, re-applied explicitly inside `HighlightModal`'s document-level portal. |
+| `theme` | Unchanged from 2.0: injected as `--mc-*` custom properties by `defineMosaicastElement`, re-applied explicitly inside `HighlightModal`'s document-level portal. Its sibling channel, the host's `--mc-icon-*` artwork, is **not** a `ctx` field at all — see [below](#icons-come-from-the-host-and-not-through-ctx-core-0615). |
 | `log` | New in 0.4.0 — replaces the old `POST /api/plugins/{id}/log`. Called on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, an admin settings save/failure, and every consent request/grant/deny in `ConsentExtras`. |
 | `blobs` | New in 0.8.0 — an optional podcaster-uploaded **image** on a highlight, and the reason this plugin's manifest carries a [`blobs` block](#file-uploads-live-behind-a-manifest-declaration-sdk-080) at all (`ctx.blobs` is `null` without one). The edit modal reads `quota()` *before* a file is picked, `upload()`s the pick, stores only the returned **`ref`**, and `remove()`s whatever it stopped pointing at; the view derives the URL with `urlFor(ref)` at render time. Served same-origin, so unlike `ConsentExtras`' external `<img>` it needs no declared CSP host and makes no consent decision. |
 | `links` | New in 0.8.0 — `episode(slug, { t })` on every browse-index row and on the deep-link view (where `t` is the podcaster's own key moment, turning it into core's timestamp deep link), and `feed(slug, { season })` on the feed-scope filter note. Strings for real `href`s, never navigation — see [below](#links-vs-navigate-two-different-questions) for why this is separate from `ctx.route`. |
@@ -70,9 +70,9 @@ attached (ARCHITECTURE §7.3): a plugin puts a badge there and keeps full render
 `main`. This plugin therefore ships `sample-highlight-card` as a *separate* Web Component rather than
 reusing `sample-highlight`, and the differences are the whole lesson:
 
-- **It never renders the markdown body** — only a `✨ Highlight` label plus the key moment if there is one.
+- **It never renders the markdown body** — only a `Highlight` label plus the key moment if there is one.
   A side effect worth noticing: because there is no content on a card, the `ctx.progress` spoiler gate
-  `Highlight` implements is moot here, so a spoiler-marked highlight is announced as `✨ Highlight ·
+  `Highlight` implements is moot here, so a spoiler-marked highlight is announced as `Highlight ·
   spoiler` and nothing else leaks.
 - **It renders nothing at all when there is no highlight** (`return null`), not an empty-state line. A feed
   card belongs to the host; adding a permanent "no highlight yet" row to every card in a list is a poor guest.
@@ -81,6 +81,52 @@ reusing `sample-highlight`, and the differences are the whole lesson:
   fetch each would be N extra round trips for cosmetics. Asserted in `HighlightCard.test.tsx`.
 
 Declaring `card` is optional: declare it or omit it, but don't put the full rendering in both.
+
+## Icons come from the host, and not through `ctx` (core 0.6.15)
+`frontend/src/icons.tsx` draws the **shell's own icon set** — `--mc-icon-edit`, `--mc-icon-play`,
+`--mc-icon-star`, … (ARCHITECTURE §12.3). The delivery mechanism is the interesting part: they are plain
+CSS custom properties declared on the host document's `:root`, and custom properties **inherit through the
+shadow boundary**. So a Web Component reads them with **no SDK import, no `platformApi` bump and no version
+skew** — this plugin builds against SDK 0.8.0 and will pick up an icon a *later* core release publishes,
+the day it lands. That is precisely why they aren't on `ctx`: putting them there would make every new icon
+an SDK release plus a manifest bump for every installed plugin.
+
+Three rules, all of them load-bearing:
+
+```css
+.mcIcon--edit { mask-image: var(--mc-icon-edit, var(--sample-icon-blank)); }
+.mcIcon       { mask-size: contain; mask-repeat: no-repeat; background: currentColor; }
+```
+
+1. **Mask, never `background-image`.** `currentColor` behind a mask means the icon takes the colour of the
+   label beside it and re-themes with everything else. A `background-image` bakes in the artwork's own
+   colour (black), which vanishes on a dark `--mc-surface`.
+2. **Every reference needs a fallback, and `none` is the wrong one.** An unresolved `var()` makes the
+   declaration invalid at computed-value time, so `mask-image` reverts to its initial `none` — an
+   *unmasked* element painting `currentColor` across its whole box. The failure mode of a missing icon is
+   a **solid square**, not a blank space. `--sample-icon-blank` is an empty SVG, so a host predating the
+   icon set renders nothing and the label carries on alone. `icons.test.tsx` pins this per name.
+3. **Never declare into `--mc-*` yourself.** That prefix is the host's namespace; defining into it would
+   shadow the real token for your subtree the moment core publishes one. This plugin's own property is
+   `--sample-icon-blank`, and a test asserts every property the stylesheet declares starts with `--sample-`.
+
+**The follow-on change is the one worth copying.** Before this, the marks lived *inside* the translated
+strings — `"moment.jump": "▶ Jump to {{time}}"`, `"fav.on": "★ Favourited"`, `"browse.back": "← Back to all
+highlights"`. That made presentation into something a translator could alter, drop, or mirror wrongly for
+an RTL locale, and rendered as whatever emoji font the visitor's platform happened to ship. Both catalogs
+are now sentences only; the mark comes from CSS at the call site, and a test walks `en.json`/`de.json` to
+keep them that way. **An icon is not a word.**
+
+Every icon here is decorative and `aria-hidden`, sitting beside a real label — announcing it too would read
+the meaning twice. The only stateful one is the favourite star (`star`/`star-on`), which still never carries
+the state alone: `aria-pressed` and the label both change with it. And because the icon element has empty
+`textContent`, the tests elsewhere in this repo go on finding buttons by their exact label.
+
+One packaging note: `ICON_CSS` is a **string**, concatenated into each component's `<style>` rather than
+shipped as a CSS file. Each of this plugin's elements renders into its own shadow root, and a bundled
+stylesheet would land in the host document where it could reach none of them. `HighlightModal` portals into
+a *second* shadow root, so it repeats the rules — the `--mc-icon-*` values themselves still arrive from
+`:root` either way, which is the whole point of shipping artwork as tokens.
 
 ## Removing a highlight — the fourth doc-store verb
 The edit modal's **Remove** button is this repo's example of `ctx.api.delete` and its backend counterpart
@@ -468,6 +514,64 @@ From here, rename `id`/`name` in `plugin.json`, the Java package under `backend/
 custom element tags in `frontend/src/sample-element.tsx`, and replace the highlight-note logic with your
 own.
 
+## Installing a *released* plugin, and how this repo publishes one (core 0.6.15)
+The copy above is the developer loop: you built it, so you have a `dist/`. An **operator** installing
+someone else's plugin has no checkout, and for them core resolves a spec instead — `owner/repo[@tag]
+[#sha256:…]`, a tarball URL, or a local file (ARCHITECTURE §7.1):
+
+```bash
+# one instance, from a checkout of core
+scripts/install-plugin.sh Mosaicast/mosaicast-plugin-sample@v2.10.0#sha256:<from the release notes>
+
+# or in a container, resolved before the JVM starts
+MOSAICAST_PLUGINS="Mosaicast/mosaicast-plugin-sample@v2.10.0#sha256:<…>"
+```
+
+There is **no registry**: GitHub Releases are the index, reached as a plain `releases/download/<tag>/`
+redirect — no API call, no token, no JSON parsing. Two consequences for a plugin author:
+
+- **Pin the tag *and* the checksum.** Plugins are trusted, in-process and unsandboxed (§7.1); making
+  installation one env var away does not change that, and the checksum is the only integrity control the
+  model has. Which is why publishing the digest is the *plugin's* job, not the operator's.
+- **The folder name comes from the manifest's `id`**, never the repo name — a folder disagreeing with its
+  id is rejected at load anyway.
+
+`.github/workflows/release.yml` is what makes this repo installable that way, copied unmodified from core's
+`dev/templates/release-plugin.yml`. On a published release it runs `./build.sh`, packages `dist/` as
+`plugin.tgz`, attaches it, and appends the tarball's SHA-256 to the release notes. **Two lines in it that
+look arbitrary and are not:**
+
+- **The asset name `plugin.tgz` is load-bearing.** The installer resolves `owner/repo@tag` straight to
+  `releases/download/<tag>/plugin.tgz`. Rename the asset and installs by `owner/repo` stop working.
+- **It fails a tag that disagrees with `plugin.json`'s `version`.** `v2.10.0` must mean
+  `"version": "2.10.0"`, or an operator pinning a tag installs something calling itself another version.
+
+`install.sh` is not going anywhere — a local copy is still valid and always will be. The two paths answer
+different questions: `install.sh` installs *what you just built*, `install-plugin.sh` installs *what someone
+published*, with a checksum you can audit.
+
+## Credit fields: who wrote this, and under what terms (core 0.6.15)
+Four optional manifest fields, all of which surface on the host's public `/about` page (§7.2, §12.6):
+
+```json
+  "name": "Sample",
+  "license": "Apache-2.0",
+  "author": "The Mosaicast Authors",
+  "homepage": "https://github.com/Mosaicast/mosaicast-plugin-sample",
+```
+
+- **`license`** is this repo's actual `LICENSE` and matches the SPDX header on every source file — worth
+  checking rather than copying, since the sample is Apache-2.0 while the other official plugins are AGPL.
+- **`attribution`** is the fourth field, deliberately **absent here**: it credits something a plugin
+  *borrows* — a data source, artwork, an upstream library — and this one borrows nothing. It is separate
+  from `homepage` because "where this lives" and "who deserves credit for it" are different links.
+- They are **optional and never validated.** A manifest without them loads exactly as before, and a
+  misspelled licence string is still a working plugin. Credit is not a correctness concern.
+- **This is not a `platformApi` bump**, and that matters: the host ignores unknown manifest fields and the
+  SDK has no manifest type, so the change is additive in both directions. Bumping would be actively
+  harmful — the check is an exact `major.minor` match, so it would reject every installed plugin until
+  each one re-released.
+
 ## Build & test
 ```bash
 ./build.sh        # -> dist/
@@ -506,6 +610,23 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.10.0** — the **core 0.6.15** additions, and **no `platformApi` bump**: all three are host-side or
+  additive-manifest, so this still declares `0.8.0` and keeps loading everywhere. That restraint is the
+  first lesson of the release — the version check is an exact `major.minor` match, so a reflexive bump
+  would reject every installed plugin until each one re-released.
+  - **[Host icons via `--mc-icon-*`](#icons-come-from-the-host-and-not-through-ctx-core-0615)** — the shell
+    publishes a subset of its icon set as CSS custom properties, which inherit through the shadow boundary,
+    so `frontend/src/icons.tsx` draws the shell's own artwork with **no SDK import and no version skew**.
+    The knock-on is the part worth copying: the marks used to be literal `▶`/`★`/`←` characters *inside*
+    the translated strings, and both catalogs are now sentences only. An icon is not a word. Note the
+    fallback rule — a missing token renders a **solid square**, not nothing, unless you say so.
+  - **[Credit in the manifest](#credit-fields-who-wrote-this-and-under-what-terms-core-0615)** —
+    `license`/`author`/`homepage`, shown on the host's public `/about` page. Optional, never validated.
+    `attribution` is deliberately left out: this plugin borrows nothing, and its absence is the example.
+  - **[`release.yml`, so an operator can install by spec](#installing-a-released-plugin-and-how-this-repo-publishes-one-core-0615)** —
+    copied unmodified from core's `dev/templates/release-plugin.yml`. On a published release it attaches
+    `plugin.tgz` (the name is load-bearing) and publishes the SHA-256 an operator needs to pin what they
+    audited. `install.sh` stays; the two paths install different things.
 - **2.9.0** — SDK **0.8.0** (`platformApi` bumped to match; core rejects a `major.minor` mismatch at load,
   so a `0.7.x` manifest stops loading the moment the host is on 0.8.0). Both additions are exercised, which
   for one of them meant declaring something:

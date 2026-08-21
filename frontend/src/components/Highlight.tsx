@@ -7,6 +7,7 @@ import type { BlobQuota, PluginContext, PluginRoute } from '@mosaicast/plugin-sd
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { makeI18n } from '../i18n';
+import { ICON_CSS, Icon } from '../icons';
 import { HighlightModal } from './HighlightModal';
 import { ConsentExtras } from './ConsentExtras';
 import { FONT_STACKS, SETTINGS_PATH, type SiteSettings } from './AdminSettings';
@@ -95,6 +96,10 @@ function renderMarkdown(markdown: string): string {
  *   operator can refuse it.
  * - `links` (0.8.0) — `episode(slug, { t })` from the deep-link view and the browse index, and
  *   `feed(slug, { season })` from the filter note. Strings for real `href`s, never navigation.
+ *
+ * The host's `--mc-icon-*` set (§12.3, core 0.6.15) is the one surface here that reaches *past* `ctx`:
+ * CSS custom properties inherit through the shadow boundary, so {@link Icon} draws the shell's own
+ * artwork without an SDK import. See `../icons.tsx` for why that matters and what a missing token does.
  *
  * The one field it does not touch is `ctx.schema` (0.7.0), which is `null` for any plugin whose manifest
  * declares `"storage": "doc"` — as this one's does, the doc store being the default.
@@ -407,6 +412,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   return (
     <div className="highlight" style={{ fontFamily }}>
       <style>{`
+        ${ICON_CSS}
+        /* Buttons and links carry an icon *plus* their label, so both need to line up on the text
+           baseline rather than the box. inline-flex on a link would also break its wrapping. */
+        button, .listen a, .back, .browse .episodeLink { display: inline-flex; align-items: center; gap: 0.35rem; }
         .highlight {
           background: var(--mc-surface);
           color: var(--mc-text);
@@ -455,7 +464,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .spoiler { display: flex; flex-direction: column; gap: 0.4rem; }
         .spoiler p { margin: 0; font-style: italic; color: var(--mc-text-muted); }
         .moment { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
-        .moment .passed { color: var(--mc-text-muted); }
+        .moment .passed { color: var(--mc-text-muted); display: inline-flex; align-items: center; gap: 0.25rem; }
         .fav { margin-top: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
         .fav .favCount, .fav .favHint { color: var(--mc-text-muted); }
         /* The pressed state uses accent-on-accent rather than a second literal colour — this is the one
@@ -484,8 +493,13 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         }
       `}</style>
 
+      {/* Every icon in this component sits *beside* its label, never instead of it. That is what lets
+          the catalogs (`locales/*.json`) hold plain sentences: before 0.6.15 the arrow here was a literal
+          `←` inside the translated string, which made a piece of presentation something a translator
+          could change, drop, or mirror wrongly for an RTL locale. An icon is not a word. */}
       {inDeepLink && (
         <a className="back" {...internalLink(ctx.route, '')}>
+          <Icon name="arrow-left" />
           {i18n.t('browse.back')}
         </a>
       )}
@@ -494,6 +508,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         <span className="title">{heading}</span>
         {canEdit && (
           <button type="button" ref={editButtonRef} onClick={openEditor}>
+            <Icon name="edit" />
             {i18n.t('edit')}
           </button>
         )}
@@ -551,6 +566,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               highlight.momentSeconds != null ? { t: highlight.momentSeconds } : undefined,
             )}
           >
+            <Icon name="play" />
             {highlight.momentSeconds != null
               ? i18n.t('listen.at', { time: formatTime(highlight.momentSeconds) })
               : i18n.t('listen')}
@@ -568,9 +584,15 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               ctx.player.seekTo(highlight.momentSeconds!);
             }}
           >
+            <Icon name="play" />
             {i18n.t('moment.jump', { time: formatTime(highlight.momentSeconds) })}
           </button>
-          {playerTime >= highlight.momentSeconds && <span className="passed">{i18n.t('moment.passed')}</span>}
+          {playerTime >= highlight.momentSeconds && (
+            <span className="passed">
+              <Icon name="check" />
+              {i18n.t('moment.passed')}
+            </span>
+          )}
         </div>
       )}
 
@@ -583,6 +605,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               aria-pressed={favourite}
               onClick={toggleFavourite}
             >
+              {/* The one icon here that carries *state*: filled when this visitor has marked it, outline
+                  when they have not. It still never carries the state alone — `aria-pressed` above is
+                  what a screen reader announces, and the label changes too. */}
+              <Icon name={favourite ? 'star-on' : 'star'} />
               {favourite ? i18n.t('fav.on') : i18n.t('fav.off')}
             </button>
           ) : (
@@ -633,7 +659,11 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                     index knows slugs, not each episode's key moment, and fetching every highlight to
                     decorate a list would be a request per row. The deep-link view has the doc, so that
                     is where the timestamp link lives. */}
+                {/* `share-out` — the shell's own "this leaves here" mark. The two links in this row
+                    differ in exactly that way, so they are marked differently: the title above stays in
+                    the plugin's subtree, this one hands the visitor to core. */}
                 <a className="episodeLink" href={ctx.links.episode(slug)}>
+                  <Icon name="share-out" />
                   {i18n.t('browse.episode')}
                 </a>
               </li>
@@ -647,6 +677,14 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       {modalOpen && (
         <HighlightModal theme={ctx.theme}>
           <style>{`
+            ${ICON_CSS}
+            /* The modal is portalled into its *own* shadow root (see HighlightModal), so the icon rules
+               above have to be repeated here — a shadow root inherits custom properties from the host
+               document but not stylesheets from a sibling. The --mc-icon-* values themselves still
+               arrive from :root either way, which is the whole point of shipping artwork as tokens. */
+            button, .imageField .quota, .imageField .uploadError {
+              display: inline-flex; align-items: center; gap: 0.35rem;
+            }
             .overlay {
               position: fixed;
               inset: 0;
@@ -789,6 +827,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               {canAttachImage && blobs && (
                 <div className="imageField">
                   <label className="field">
+                    <Icon name="image" />
                     {i18n.t('image.label')}
                     <input
                       type="file"
@@ -815,10 +854,16 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                       })}
                     </p>
                   )}
-                  {uploading && <p className="quota">{i18n.t('image.uploading')}</p>}
+                  {uploading && (
+                    <p className="quota">
+                      <Icon name="upload" />
+                      {i18n.t('image.uploading')}
+                    </p>
+                  )}
                   {/* The refusal reaches the person, not only ctx.log — see handlePickImage. */}
                   {uploadError && (
                     <p className="uploadError" role="alert">
+                      <Icon name="warning" />
                       {i18n.t('image.refused', { reason: uploadError })}
                     </p>
                   )}
@@ -843,6 +888,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                           setUploadError('');
                         }}
                       >
+                        <Icon name="delete" />
                         {i18n.t('image.clear')}
                       </button>
                     </>
@@ -885,6 +931,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                       {i18n.t('cancel')}
                     </button>
                     <button type="button" className="danger" onClick={handleRemove} disabled={removing}>
+                      <Icon name="delete" />
                       {removing ? i18n.t('removing') : i18n.t('remove.yes')}
                     </button>
                   </>
@@ -897,6 +944,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                         onClick={() => setConfirmingRemove(true)}
                         disabled={saving}
                       >
+                        <Icon name="delete" />
                         {i18n.t('remove')}
                       </button>
                     )}
@@ -905,6 +953,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                       {i18n.t('cancel')}
                     </button>
                     <button type="button" onClick={handleSave} disabled={saving}>
+                      <Icon name="save" />
                       {saving ? i18n.t('saving') : i18n.t('save')}
                     </button>
                   </>
