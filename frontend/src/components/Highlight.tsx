@@ -12,6 +12,7 @@ import { HighlightModal } from './HighlightModal';
 import { ConsentExtras } from './ConsentExtras';
 import { FONT_STACKS, SETTINGS_PATH, type SiteSettings } from './AdminSettings';
 import {
+  declaredType,
   favouriteCountPath,
   favouriteDocPath,
   formatBytes,
@@ -325,7 +326,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
     setUploadError('');
     const replaced = draftImage?.ref;
     try {
-      const stored = await blobs.upload(file);
+      // `declaredType` first: a browser that could not name the file's type hands over `''`, which
+      // reaches the host as `application/octet-stream` and is refused before the bytes are read. See
+      // its doc comment — this is the one line between "works everywhere" and "works in Chromium".
+      const stored = await blobs.upload(declaredType(file));
       // Keep the ref, never `urlFor(ref)` — see HighlightImage. Alt text carries over on replacement:
       // swapping the picture rarely changes what it depicts, and losing it silently is an a11y regression.
       setDraftImage({ ref: stored.ref, alt: draftImage?.alt ?? '' });
@@ -837,7 +841,11 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                     {i18n.t('image.label')}
                     <input
                       type="file"
-                      accept="image/png,image/jpeg,image/webp"
+                      // Types *and* extensions, for the same reason `declaredType` exists: a browser
+                      // filters this picker with the platform's MIME database, so where that lookup
+                      // fails the type half matches nothing and the file the podcaster wants is greyed
+                      // out. The extension half is what they can still pick with.
+                      accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.jfif,.webp"
                       disabled={uploading}
                       onChange={(e) => {
                         const file = e.target.files?.[0];

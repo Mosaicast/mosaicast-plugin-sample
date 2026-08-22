@@ -18,42 +18,32 @@
   "stat": "{{highlighted}} von {{total}} Episoden hervorgehoben",
   "stat.withMoment": "{{count}} mit Schlüsselmoment",
   "stat.favourites": "· {{count}} Favorit(en) von Hörer:innen",
-
   "moment.label": "Schlüsselmoment (Sekunden in die Episode)",
   "moment.jump": "Springe zu {{time}}",
   "moment.passed": "gehört",
-
   "spoiler.markLabel": "Als Spoiler markieren (verstecken, bis diese:r Besucher:in zu hören begonnen hat)",
   "spoiler.hidden": "Spoilerschutz: Höre diese Episode an, um das Highlight anzuzeigen.",
   "spoiler.reveal": "Trotzdem anzeigen",
-
   "planned.badge": "Kommende Episode — noch keine Spoiler",
-
   "fav.off": "Zu Favoriten",
   "fav.on": "Favorisiert",
   "fav.count": "{{count}} Hörer:innen haben das favorisiert",
   "fav.anonymous": "Melde dich an, um dieses Highlight zu favorisieren",
-
   "card.label": "Highlight",
   "card.moment": "Schlüsselmoment bei {{time}}",
   "card.spoiler": "Spoiler",
-
   "filter.season": "Gefiltert nach Staffel {{season}}",
-
   "browse.title": "Hervorgehobene Episoden durchsuchen",
   "browse.back": "Zurück zu allen Highlights",
   "browse.episode": "Episodenseite",
-
   "listen": "Diese Episode anhören",
   "listen.at": "Ab {{time}} anhören",
-
   "image.label": "Bild (PNG, JPEG oder WebP)",
   "image.alt": "Bildbeschreibung (für Screenreader)",
   "image.clear": "Bild entfernen",
   "image.uploading": "Wird hochgeladen…",
   "image.quota": "{{remaining}} Speicher übrig · bis zu {{max}} pro Datei",
   "image.refused": "Upload abgelehnt: {{reason}}",
-
   "consent.summary": "Einwilligung: {{granted}}",
   "consent.none": "keine erteilt",
   "consent.analytics.granted": "Anonymer Seitenaufruf gezählt.",
@@ -63,7 +53,6 @@
   "consent.social.alt": "Share-Widget",
   "consent.social.request": "Share-Widget erlauben, um es hier anzuzeigen",
   "consent.necessary.alt": "Highlight-Plugin-Wortmarke (immer sichtbar, nicht an Einwilligung gebunden)",
-
   "settings.title": "Website-Highlight-Einstellungen",
   "settings.hint": "Gilt für jede Episoden-/Podcast-/Website-Highlight-Kachel der gesamten Seite.",
   "settings.headingLabel": "Überschrift überschreiben (alle Bereiche)",
@@ -73,5 +62,24 @@
   "settings.font.serif": "Serif",
   "settings.font.mono": "Monospace",
   "settings.save": "Einstellungen speichern",
-  "settings.saved": "Gespeichert"
+  "settings.saved": "Gespeichert",
+  "page.title": "Highlights",
+  "page.tagline": "Die Momente, auf die diese Show am stolzesten ist — eine Karte pro Episode, und ein direkter Weg ins Audio.",
+  "page.nav.label": "Highlight-Ansichten",
+  "page.nav.highlights": "Alle Highlights",
+  "page.nav.moments": "Schlüsselmomente",
+  "page.nav.gallery": "Galerie",
+  "page.nav.unwritten": "Zu schreiben",
+  "page.stat.highlights": "hervorgehoben",
+  "page.stat.moments": "mit Moment",
+  "page.stat.pictures": "mit Bild",
+  "page.back": "Alle Highlights",
+  "page.index.empty": "Noch keine Highlights. Ein:e Podcaster:in kann das erste auf jeder Episodenseite schreiben.",
+  "page.moments.empty": "Noch keine Schlüsselmomente markiert.",
+  "page.gallery.empty": "Noch trägt kein Highlight ein Bild.",
+  "page.gallery.disabled": "Dateispeicher ist auf dieser Installation deaktiviert — es gibt keine Galerie.",
+  "page.unwritten.empty": "Jede Episode hat ein Highlight. Nichts mehr zu schreiben.",
+  "page.unwritten.write": "Schreiben",
+  "page.unwritten.denied": "Diese Ansicht ist für das Team der Show.",
+  "page.detail.missing": "Diese Episode hat kein Highlight."
 }

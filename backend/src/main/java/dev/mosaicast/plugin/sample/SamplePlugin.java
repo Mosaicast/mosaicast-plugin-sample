@@ -157,6 +157,39 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     }
 
     /**
+     * One highlighted episode, as the plugin's own page lists it.
+     *
+     * @param slug           the episode's public slug, the only identifier a client ever sees
+     * @param excerpt        a plain-text opening of the markdown, for a card; never the whole body
+     * @param momentSeconds  the podcaster's key moment, or null
+     * @param imageRef       the uploaded image's ref, or null — the page derives its URL with
+     *                       {@code ctx.blobs.urlFor} at render time, never a stored URL
+     * @param favourites     how many visitors marked it, from the same tally {@link FavouriteCount} publishes
+     */
+    record IndexEntry(String slug, String excerpt, Integer momentSeconds, String imageRef, int favourites) {
+    }
+
+    /**
+     * Every highlighted episode in one document, published to {@code data/site/main/index}.
+     *
+     * <p><strong>Why the backend owes the page this.</strong> The plugin's page renders four views over the
+     * same data — all highlights, only those with a key moment, only those with an image, and (for a
+     * podcaster) the episodes with none. A browser cannot assemble any of them: the host's doc surface is
+     * addressed by scope and key, so a frontend wanting every episode's highlight has to issue one request
+     * per episode and then hope none 404s mid-list. The backend already walks exactly that set once per
+     * recompute — {@link #recomputeHighlightStats(PluginContext)} — so it publishes the answer instead, and
+     * the page costs one GET no matter how long the feed is.
+     *
+     * <p>This is the same shape as {@code stats}: derived, backend-written, and declared
+     * {@code data.backendOwned} so a client {@code PUT} is a 403 rather than a way to invent a listing.
+     * It carries only what a card shows — an excerpt, not the body — because the detail view fetches the
+     * real document anyway, and an index that duplicates every highlight in full is a second copy free to
+     * go stale.
+     */
+    record HighlightIndex(List<IndexEntry> entries) {
+    }
+
+    /**
      * Set once by {@link #register(PluginContext)}; {@link ShareMetadataProvider}/{@link SitemapProvider}
      * have no {@code ctx} parameter of their own, so they reuse this. {@code static} (not a plain instance
      * field) because PF4J instantiates this class separately per extension-point lookup — see the class
@@ -208,6 +241,9 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         int withMoment = 0;
         int pruned = 0;
         int totalFavourites = 0;
+        // Built in the same pass for the same reason the image refs are: a second walk could disagree with
+        // this one, and the page would then list an episode whose highlight this pass just pruned.
+        List<IndexEntry> index = new ArrayList<>();
         for (String id : episodeIds) {
             totalFavourites += publishFavouriteCount(ctx, id, favourites.getOrDefault(id, 0));
             // A "highlight" doc key is unique per episode scope, so this keyPrefix scan returns at most
@@ -237,10 +273,18 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                     continue;
                 }
                 highlighted++;
-                if (node.path("momentSeconds").isNumber()) {
+                Integer moment = node.path("momentSeconds").isNumber() ? node.path("momentSeconds").asInt() : null;
+                if (moment != null) {
                     withMoment++;
                 }
                 rememberImageRef(node, referencedImages);
+                JsonNode ref = node.path("image").path("ref");
+                index.add(new IndexEntry(
+                        id,
+                        excerpt(markdown.stringValue()),
+                        moment,
+                        ref.isString() ? ref.stringValue() : null,
+                        favourites.getOrDefault(id, 0)));
             }
         }
         sweepOrphanedImages(ctx, referencedImages);
@@ -249,6 +293,8 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                         + " {} favourite(s) across all visitors)",
                 highlighted, episodeIds.size(), withMoment, pruned, totalFavourites);
         ctx.store().put(Scope.site(), "stats", new HighlightStats(episodeIds.size(), highlighted, withMoment, totalFavourites));
+        // Published after the prune above, so a doc removed in this pass never appears in the listing.
+        ctx.store().put(Scope.site(), "index", new HighlightIndex(index));
     }
 
     /** Adds the {@code image.ref} of every entry in {@code entries} to {@code refs}. */
