@@ -142,14 +142,23 @@ interface FeedAccess { List<String> episodesIn(Scope scope); DisplaySnapshot dis
 ```
 The host fills the frontend `ctx.episodes[]` from this. A plugin never figures out itself how a season is defined.
 
-**Filter state lives in the URL** (query params, e.g. `?season=2&tag=christmas`): filtered views are shareable/bookmarkable, the back button works, and the server can read the params when rendering share metadata (§6.4). Plugins still consume filters read-only via `ctx.filter`. Filter axes: **season** (§4.4), **tag** (feed-derived keywords/categories, `episode_tag`) and ordering; **feed** is selected by the shell's **per-feed tabs** (All + one per feed; a single-feed site shows no tabs and lives at that feed's own URL). The feed view is **two-column**: a left **scope panel** (a **feed panel** — cover/title/author/description + the `feed` plugin region — on a feed tab, or a **site panel** — logo/name + the `site` region — on the All tab) beside the episode list (which infinite-scrolls). Host-defined **subfeeds** (a saved tag/search/filter as a named view) are a planned extension.
+**Filter state lives in the URL** (query params, e.g. `?season=2&tag=christmas`): filtered views are shareable/bookmarkable, the back button works, and the server can read the params when rendering share metadata (§6.4). Plugins still consume filters read-only via `ctx.filter`. Filter axes: **season** (§4.4), **tag** (§6.1.1) and ordering; **feed** is selected by the shell's **per-feed tabs** (All + one per feed; a single-feed site shows no tabs and lives at that feed's own URL). The feed view is **two-column**: a left **scope panel** (a **feed panel** — cover/title/author/description + the `feed` plugin region — on a feed tab, or a **site panel** — logo/name + the `site` region — on the All tab) beside the episode list (which infinite-scrolls). Host-defined **subfeeds** (a saved tag/search/filter as a named view) are a planned extension.
+
+#### 6.1.1 Tags: a shared vocabulary, with provenance
+Tags began as one feed's `<itunes:keywords>`/`<category>`, rewritten on every poll. They are now a **site-wide vocabulary several writers share**, because a plugin that wanted tags otherwise invented a private one — and two things labelled `lore` on the same site had no relationship to each other.
+
+- **The host owns the key.** Every writer sends any spelling; the host canonicalises (trim, collapse internal whitespace, casefold) and keeps a **display label from first use**, so `Maritime` and `maritime ` converge without lower-casing what a visitor reads. The rule is applied to **feed ingest too** — a vocabulary normalised on one path only is not normalised. `/api/tags` therefore returns `{ tag, label }`, and an incoming `?tag=` is canonicalised so links written in any spelling keep matching.
+- **Every assignment carries a source**: `feed` · `manual` (a podcaster in admin) · `plugin:<id>`. The reconciler's per-poll overwrite narrows to the rows the feed owns. Before that column existed the wipe was unqualified, so a tag a podcaster or a plugin added survived until the next poll — minutes, in practice, which reads as "it did not save".
+- **A plugin's own assignments** are keyed by an opaque `subject_key` it invents inside its own namespace (`plugin_tag`), the property `SchemaStore` has for tables and `ctx.route.navigate` has for URLs.
+- **Three things a writer may never do**, enforced rather than asked: remove another writer's assignment (the feed's included), delete a word from the vocabulary (it is shared; an entry outlives its last assignment), or rename one. Renaming and curation are admin's.
+- **Tagging an episode is a capability, not a convenience.** It changes the shell's filter options *and* what `RelatedProvider` recommends beside that episode (§6.3), so it is a separate manifest declaration (§7.2) from tagging a plugin's own subjects, and its absence is a refusal rather than a silently dropped write.
 
 ### 6.2 Sequential navigation (always shown)
 Previous/next episode are **core navigation, not related and not a plugin** — always shown (detail page + player). **Order: release order (`publishedAt`) within the feed** — the same sequence the browsable feed shows (§6.1), so `prev` is the previously released episode and `next` the next released one, and navigation always matches what the listener sees in the list. Episode numbers deliberately do **not** drive navigation: real feeds routinely omit `itunes:episode` (e.g. Acast) or number inconsistently, so a numberless trailer/bonus would otherwise be coerced to "episode 0" and jump to the front. An episode without a `pubDate` counts as the earliest point in the series; ties fall back to season + episode no. **Only released episodes are part of the sequence** — a `PLANNED` episode leads the *listing* (§6.1, upcoming first) but has no audio, so it is never anyone's `next` (auto-advance would land on an unplayable episode); its own page links back to the latest release. (The per-feed *listing* order used by `FeedAccess.episodesIn` stays season + episode no., nulls last — that is a catalogue view, not the navigation sequence.) **The player auto-advances to the next episode when one ends** (same sequence logic). Must work with zero plugins.
 
 ### 6.3 RelatedProvider (core, swappable strategy – not a plugin)
 Interface: `related(EpisodeRef ctx, int limit) → List<EpisodeRef>` with capabilities.
-**v1 strategy (deterministic, no ML):** pinned episodes (podcaster-curated in admin) win, otherwise a weighted blend of **same season** (recency), **shared tags/keywords** (`<itunes:keywords>`/`<category>` or manual), fuzzy title. Exclude: current episode, PLANNED, WITHDRAWN; locked ones at most as a lock stub. **Computed on-request + cached**, invalidated on new episodes.
+**v1 strategy (deterministic, no ML):** pinned episodes (podcaster-curated in admin) win, otherwise a weighted blend of **same season** (recency), **shared tags/keywords** (§6.1.1 — the feed's, a podcaster's, or a plugin's, counted once per topic rather than once per writer who agreed), fuzzy title. Exclude: current episode, PLANNED, WITHDRAWN; locked ones at most as a lock stub. **Computed on-request + cached**, invalidated on new episodes.
 **Future (v2):** an embedding strategy (`pgvector`, cosine) or a recommender plugin overrides the provider — the sidebar widget doesn't change. Runs over `EpisodeRef` → automatically respects dedup + tier gating.
 
 ### 6.4 Deep links & share metadata (SEO/OG)
@@ -175,6 +184,16 @@ Same machinery as §6.4 (the server knows episodes and can ask plugins), extende
 - **Hygiene:** `rel=canonical` (normalize filter query params — they're in the URL per §6.1, so prevent duplicate content), `hreflang` once >1 UI locale is active, `<link rel="alternate" type="application/rss+xml">` for feed discovery, and **real HTTP 404s** for unknown episodes/routes (no soft-404).
 
 ---
+
+### 6.7 Site-wide search
+`/api/search?q=` searches episodes **and** whatever active plugins say about their own content (`SearchProvider`, §7.4). Before it, core searched episodes and nothing else, so a plugin with searchable content grew a second search box on the same site — right for its own data, wrong for a visitor, who then had two places to type the same query and no way to learn the answer was in the other one.
+
+- **Grouped by source, never merged into one ranking.** A plugin's score and Postgres `ts_rank` are not on one scale; interleaving them produces an order nobody can explain and one that changes meaning whenever a plugin changes how it scores. A section per source stays honest and survives that. Merging would need a shared scale first, not a sort.
+- **A provider gets a budget** (per provider, on a request) and a section that misses it comes back **marked rather than dropped** — "found nothing" and "did not answer" are different answers, and a visitor given the first concludes the content is not on this site.
+- **The host resolves the URL.** A hit names a subpath; the host resolves it under `/p/<pluginId>/` and drops `.`/`..` segments exactly as `ctx.route.navigate` does, so a result cannot point at a core route or another plugin.
+- **Access is the plugin's job here** — the one place in this contract where it is. See §7.4.
+
+`/api/episodes/search?q=` remains as the episode-only, paginated query for callers that want exactly that.
 
 ## 7. Plugin System (the heart)
 
@@ -209,6 +228,7 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
   "storage": "doc",
   "data":    { "readableBy": "fan", "writableBy": "podcaster", "backendOwned": ["stats", "agg:*"] },
   "config":  { "fuzzyThreshold": { "type": "number", "default": 0.85, "editableBy": "podcaster" } },
+  "tags":    { "readsVocabulary": true, "writesEpisodes": false },
   "consent": { "services": [] }
 }
 ```
@@ -217,9 +237,10 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
 - **`storage`**: `"doc"` = generic JSONB store. For the wiki, a schema declaration instead (§7.6).
 - **`data`**: the access floor of the generic data surface (§7.6) — `readableBy` / `writableBy`, each `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`. **Declared, never derived:** the host does not infer it from slots. An absent block defaults `readableBy` to the *write* floor, not to anonymous — a **behaviour change**: a plugin that relied on an anonymous slot making its data anonymously readable must now declare `readableBy: "anonymous"` to keep it. A slot's `visibleTo` governs **rendering only**. Neither floor applies to the `USER` scope (§7.6). `backendOwned` names the keys only the plugin's **backend** may write — an exact key, a `*`-terminated prefix, or the bare `*`; clients may still read them (subject to `readableBy`) and a client `PUT`/`DELETE` is a **403** the host words apart from the role-floor one, so an author can tell which rule refused them. It is the only **per-key** rule on this surface; see §7.6 for why it is needed and what it does not do.
 - **`blobs`**: opt-in file storage (§11.1) — `maxFileBytes`, `quotaBytes`, `mimeTypes`. Declared, never derived, like `data`: what a plugin may write to disk should be readable off its manifest. Absent = no file storage at all. The operator caps every number and intersects the type list with the install's own, so a plugin is granted the smaller of the two rather than rejected for asking. `image/svg+xml` is refused at load — SVG is never storable (§12.2).
+- **`tags`**: opt-in access to the shared tag vocabulary (§6.1.1) — `{ "readsVocabulary": true, "writesEpisodes": false }`. Declared, never derived, like `data` and `blobs`; absent means **no tag surface at all** (`ctx.tags` is null, the endpoints 404). Two flags because the two acts are not alike: tagging a plugin's own subjects touches rows nobody else can name, while tagging an **episode** changes the shell's filter options and what core recommends beside that episode — a capability an operator should be able to read off a manifest before installing. A block declaring neither is refused at load, since it would produce a surface that exists and refuses everything.
 - **`consent`**: third-party services the plugin loads — one declaration each (`id`, `name`, `provider`, `category`, `privacyUrl`, `hosts`, `thirdCountryTransfer`, `storage[]`); the visitor decides per *category*, and `hosts` doubles as the CSP allow-list (§12.5). Omit the key entirely when the plugin loads nothing third-party.
 - **`config`**: declared fields are rendered by core as a **generic admin form** (respecting `editableBy`) — plugins never build their own config UI.
-- **`license` / `author` / `homepage` / `attribution`**: credit, shown on the public About page (§12.6). All optional and **never validated** — a plugin written before these existed must keep loading, and an oddly-spelled licence is still a working plugin; credit is not a correctness concern. `attribution` is separate from `homepage` because "where this lives" and "who deserves credit for it" are not the same link: a plugin that borrows data, artwork or an upstream library should be able to say so without giving up its own page. Purely additive in both directions — the host ignores unknown manifest fields and there is no manifest type in the SDK — so **no `platformApi` bump**, which matters because that check is an exact `major.minor` match and a bump would reject every installed plugin until each one re-released.
+- **`license` / `author` / `homepage` / `attribution`**: credit, shown on the public About page (§12.6). All optional and **never validated** — a plugin written before these existed must keep loading, and an oddly-spelled licence is still a working plugin; credit is not a correctness concern. `attribution` is separate from `homepage` because "where this lives" and "who deserves credit for it" are not the same link: a plugin that borrows data, artwork or an upstream library should be able to say so without giving up its own page. Purely additive in both directions — the host ignores unknown manifest fields, and the SDK's `PluginManifest` type is documentation for an author's editor with no runtime effect, the host remaining the sole validator — so **no `platformApi` bump**, which matters because that check is an exact `major.minor` match and a bump would reject every installed plugin until each one re-released.
 
 ### 7.3 Slots & placements
 - Regions (`top`, `card`, `main`, `sidebar`, `player`, `feed`, `site`, `admin`, …) are defined by the **host shell** per view. Plugins only target existing names; an unknown region → startup rejection. The **`feed`** and **`site`** regions are the scope panels' plugin spaces (§6.1): `feed` on a feed tab, `site` on the All tab.
@@ -233,6 +254,7 @@ public interface PluginContext {
     DocStore     store();    // (scope, key) → JSON, hard-scoped
     SchemaStore  schema();   // only present if the manifest declares schema
     PluginBlobs  blobs();    // only present if the manifest declares `blobs` (§11.1); null otherwise
+    Tags         tags();     // only present if the manifest declares `tags` (§6.1.1); null otherwise
     PluginConfig config();
     FeedAccess   feeds();
     void onSchedule(Duration every, Runnable task); // ShedLock-wrapped
@@ -261,7 +283,18 @@ interface SitemapProvider {          // optional extension point (§6.6); wiki i
     List<SitemapUrl> urls();         // absolute-path locs under /p/<pluginId>/…
 }
 record SitemapUrl(String loc, Instant lastModified) {}   // lastModified nullable
+
+interface SearchProvider {           // optional extension point (§6.7)
+    List<SearchHit> search(String query, Role role, int limit);   // role is null for anonymous
+}
+record SearchHit(String subpath, String title, String snippet, double score) {}
+
+interface UserDataHandler {          // optional extension point (§12.8)
+    void eraseUser(String userId);                                    // erase OR pseudonymise — the plugin's call
+    default Optional<Map<String, Object>> exportUser(String userId) { return Optional.empty(); }
+}
 ```
+**`SearchProvider` is the one place where access is the plugin's job.** Everywhere else in this document the host resolves access and the plugin consumes the result (§7, §10) — but core has no model of a plugin's objects and cannot know that a row carries a `published` flag or that a revision is visible only to its author. So the caller's role is passed through and **a provider that returns a draft to an anonymous visitor is a leak the host will not catch**. It is stated here, and not only in Javadoc, because it is a real exception to a rule the rest of the system relies on.
 
 ### 7.5 Frontend contract (in the SDK, TS) – the `ctx`
 The host mounts the custom element and sets `ctx`. This is the **entire** interface a plugin author has to learn:
@@ -271,13 +304,18 @@ interface PluginContext {
   episodes: string[];                 // EpisodeRef IDs in scope (resolved by the host)
   episode?: { status: 'PLANNED'|'PUBLISHED'|'WITHDRAWN' }; // on episode scope
   user:     { id: string; role: Role } | null;
-  api:      PluginApiClient;          // calls /api/plugins/<id>/* with auth token
+  api:      PluginApiClient;          // calls /api/plugins/<id>/* with auth token; rejections carry
+                                      // `status` + the RFC-7807 body, and getOrNull resolves 404 to null
+  docs:     DocClient;                // typed doc store over the same endpoints; never null (§7.6)
+  feeds:    FeedsClient;              // display(slug) / displayMany(slugs) — the frontend half of FeedAccess
   schema:   SchemaClient | null;      // read-only; null unless the manifest declares a schema (§7.6)
   blobs:    BlobClient | null;        // upload/list/delete; null unless the manifest declares `blobs` (§11.1)
+  tags:     TagsClient | null;        // null unless the manifest declares `tags` (§6.1.1)
   consent:  { has(cat: string): boolean; onChange(cb: () => void): void };
   filter:   { current(): FilterState; onChange(cb: (f: FilterState) => void): void }; // read-only
   player:   { currentTime(): number; seekTo(s: number): void; on(ev, cb): void };     // for sync plugins
-  route:    { path: string; onChange(cb: (p: string) => void): void;     // subpath under /p/<pluginId>/ (§6.4)
+  route:    { path: string; query: URLSearchParams; hash: string;        // subpath under /p/<pluginId>/ (§6.4)
+              onChange(cb: (p: string) => void): void;
               navigate(subpath: string, opts?: { replace?: boolean }): void };  // within that subtree only
   links:    { episode(slug, opts?): string; feed(slug, opts?): string }; // host URL shapes, strings only
   locale:   { current(): string; onChange(cb: (l: string) => void): void }; // active UI locale (§12.7)
@@ -286,6 +324,10 @@ interface PluginContext {
 }
 ```
 **Important:** plugins *consume* filters, they don't *define* them. Filter axes (season, tags, sorting) belong to the host.
+
+**`ctx.feeds` is the one plugin surface with no read floor of its own**, and the exception is worth writing down because "every plugin surface is gated by the manifest floor" is otherwise a reliable rule. It returns host data the same visitor can already read from `/api/episodes/*`; it exists so a plugin need not know that URL shape, which is the argument §6.4 makes for `ctx.links`. What it must not become is a way to see *more* than the visitor can, so the host filters the answer: a `WITHDRAWN` or gated episode is **absent rather than redacted**, and `display()` deliberately cannot tell "no snapshot" from "not visible" — distinguishing them would confirm the existence of an episode this visitor was not shown.
+
+**Rejections are typed.** The host attaches the HTTP status and the problem body to what `ctx.api` throws, because the contract already words two different 403s apart on purpose — the read floor refused you, versus this key is `backendOwned` (§7.2) — and before this a plugin could not read the distinction it had been given. `getOrNull` exists for the same reason in the other direction: "nothing saved yet" is the normal state of a doc-store key, and expressing it as a rejection meant every plugin wrote a `catch` that also swallowed the 500 and the network failure.
 
 **`ctx.scope` stays four-valued.** `USER` (§7.6) addresses storage, not a page — a slot is mounted into a named region of a view and there is no user view — so it appears in a `data/{scopeType}/{scopeId}/…` path and never in `ctx.scope`. A component reading per-user data addresses `data/user/me/…` explicitly while its `ctx.scope` remains whatever page it is on.
 
@@ -393,6 +435,8 @@ interface BlobStore {
     int  deleteNamespace(String namespace);    // purge (§7.8)
     Optional<String> directUrl(BlobRef ref, AccessContext ctx); // empty = serve it yourself
     BlobCapabilities capabilities();           // supportsRange, supportsPresignedUrls
+    BlobRef putVerbatim(BlobMetadata meta, InputStream data);   // writes keeping the id — migration (§11.2)
+    List<String> namespacesUnder(String prefix);                // what this backend holds below a prefix
 }
 ```
 - **Streaming-first + range requests** from day one (a 5 KB favicon like a 100 MB audio file).
@@ -401,7 +445,7 @@ interface BlobStore {
   - The cost is that each backend owes those answers *well*, and that is the backend's problem rather than the interface's: Postgres sums an indexed column, a filesystem walks a directory, an object store keeps a counter instead of paginating its own prefix on every upload. `usedBytes` is called on every write, which is the constraint that shapes the choice.
   - Listing is **offset-paged**, matching the plugin HTTP surface. That is a real constraint on an object store, which pages by continuation token; a media library is browsed from its first page, so walking to a deep one is a cost such a backend may cap. Moving to cursor paging is an SDK contract change and belongs with the backend that needs it, not before.
 - **`directUrl` is the seam that makes an object store worth having.** A backend that can serve bytes without the app in the path says so; Postgres returns empty and callers serve the bytes themselves. Proxying every byte gives up most of the reason to move them out of the database. It is also where tier-gated audio (§10) signs a URL *after* the entitlement check, which is why it takes an `AccessContext` and cannot be cached per blob.
-- v1: `PostgresBlobStore` (BYTEA). Later: `S3BlobStore`, `FilesystemBlobStore` (config switch).
+- Registered today: `PostgresBlobStore` (BYTEA) and `FilesystemBlobStore` (objects plus a JSON sidecar under a configured root, registered only when one is set). `S3BlobStore` is next, and is what `directUrl` was shaped for.
 - Tier-gated audio (future): expiring presigned URLs only after the entitlement check (`AccessContext`).
 
 ### 11.1 Plugin file storage
@@ -423,11 +467,20 @@ DELETE /api/plugins/{id}/blob/{ref}   idempotent
   - **The MIME allow-list is not grantable.** No admin decision widens it, because what a file may *be* is a security question (§12.2) rather than a capacity one.
   - Storage is **per plugin**: a wiki accumulating diagrams and a bingo plugin storing nothing have no reason to share a ceiling, and "the wiki has outgrown its space" is an ordinary operational event rather than a redeploy.
 - **Writes are the point here, and that is why this differs from §7.6.** The case against schema writes over HTTP is that no plugin code runs at request time to enforce a relational invariant. A file has none, so `data.writableBy` plus a quota is the whole authorization story. Reads take `data.readableBy` — one floor pair, three surfaces. `backendOwned` does not apply: it reserves *keys*, and a caller never names one — a ref is a UUID the host mints per upload, so an upload can never overwrite an existing file, including another tenant's.
-- **What the bytes say is what gets stored**, in this order: size, the declared type, the *actual* type read from the leading bytes, then the quota. One shared sniffer serves branding and plugins, and **SVG has no case in it** — that is what makes it unstorable rather than merely undeclared (§12.2). Refusals are **415** (type) and **413** (size or quota), worded apart because the fixes differ.
+- **What the bytes say is what gets stored**, in this order: size, the declared type, the *actual* type read from the leading bytes, then the quota. That order is why the SDK's `blobs.upload` normalises the **declared** type before sending: Firefox reads `File.type` from the OS MIME database and hands over `''` where that lookup fails, so `FormData` sends `application/octet-stream` and a valid PNG is refused on its declared type before anything sniffs it — in one browser only. Guessing there is safe precisely because this order keeps the byte check afterwards, so a wrong guess becomes the same 415 rather than a stored file of the wrong kind. Reordering these steps would take that safety with it. One shared sniffer serves branding and plugins, and **SVG has no case in it** — that is what makes it unstorable rather than merely undeclared (§12.2). Refusals are **415** (type) and **413** (size or quota), worded apart because the fixes differ.
 - **Purge removes files** alongside documents and schema tables (§7.8), matched on the namespace exactly rather than on a name prefix.
 - Blobs are served **same-origin** under `/api/`, so a plugin rendering its own upload needs no CSP host and makes no consent decision — which an external image URL cannot say. This is the answer to the asymmetry above, not merely a workaround for it.
 
 ---
+
+### 11.2 Moving a namespace between backends
+Routing a namespace at a different backend does nothing to what is already stored: the old backend keeps the bytes, the new one starts empty, so every existing ref 404s and the plugin's quota reads as zero while the source is still full. The switch therefore has a second half — a migration that runs **through `BlobStore`**, as a separate entry point (`./gradlew migrateBlobs`, `dev.mosaicast.tools.blob.BlobMigratorApplication`).
+
+- **Inside the JVM, not beside it.** An external script has to re-describe each backend's layout — a sidecar's fields, a table's columns, the rules — and that description is correct until someone adds a backend or changes a field, with nothing to say otherwise. Through the interface, a new backend is migratable the day it implements it.
+- **`putVerbatim` exists because ids must survive.** `put` mints an id, and an id is the identity a plugin stores (§11.1); a copy that renumbered objects would orphan every reference a plugin ever saved. Both it and `namespacesUnder` are **required rather than defaulted**, so a backend cannot be added that quietly cannot be migrated to — a property an operator would otherwise discover halfway through moving their files.
+- **Copy, verify by hash, then optionally delete.** Deleting the source is off by default and never happens before every object has been read back and compared; a re-run skips what already matches, so an interrupted migration continues rather than being something to unpick.
+- **A separate entry point, not a button.** It wants the app stopped, it takes a while and it deletes things. Its context is the blob package alone — no web server, no plugin loader — and Flyway is off: schema migration is the app's decision, not a side effect of moving files.
+- **`branding` cannot move.** `site_config.{logo,favicon,dark_logo}_asset_id` are foreign keys into the Postgres `blob` table and the app refuses to start when that namespace is routed elsewhere (§12.2), so the migration refuses it before reading anything.
 
 ## 12. Branding & Theming
 
@@ -482,12 +535,22 @@ Built in from the start so the project can grow international and translation is
 
 ---
 
+### 12.8 Account deletion reaches a plugin's data
+Core owns what it stored: identities, tokens, listening progress, and the `USER`-scope documents it holds on plugins' behalf (host-owned, §7.6, which is why they need no asking). It cannot touch what a plugin put in its own schema columns or files — it provisioned those tables without ever learning which column is a person, and cannot know that pseudonymising is right where deleting is not. So every installed plugin is asked, through `UserDataHandler` (§7.4), and the parts that make the promise real are all about not lying:
+
+- **Handlers run before the account row drops.** A plugin resolving a user id against a user that no longer exists cannot pseudonymise sensibly.
+- **Every plugin's part is a row written before it is asked.** A handler that throws, or one whose plugin an operator had switched off, leaves an **open record** rather than a log line — otherwise the account is gone, the person has been told it is done, and the data is still there.
+- **Outstanding erasures are retried and visible in admin**, and settle immediately when a switched-off plugin is switched back on. A plugin that is *rejected* is asked only if it has ever stored anything: it did not run this boot, but "rejected" is also what a working plugin becomes after a bad upgrade, and last week's rows do not disappear because a manifest stopped parsing.
+- **The API answers a receipt, not a 204** — complete, plus the plugins that have not finished. Reporting completion while a plugin still holds data would be the failure the whole record exists to prevent.
+
+`exportUser` is defaulted to empty so erasure could ship alone; the GDPR **data export** on the v2 roadmap hits the same wall and is meant to hang off the same code.
+
 ## 13. Non-Functional
 
 - **Scaling v3:** app instances **stateless** (Redis session, DB as the only truth), periodic jobs **ShedLock**. Moving to multiple instances behind an LB = config, not a rewrite.
 - **Observability:** Spring **Actuator** `health`/`info` (compose healthcheck + uptime monitoring hook), structured logging. Nothing fancier in v1.
 - **API conventions:** the REST API is **internal** in v1 — the SDK is the only public contract, so no API-versioning machinery. Errors as **RFC 7807** `application/problem+json` (stable `type` codes; the UI translates). **List endpoints paginate from day one.**
-- **GDPR:** store minimal (provider, external_id, optional email/name/avatar), no passwords. On account deletion **pseudonymize** public bingo contributions (cut the identity link, aggregates/leaderboard stay correct), don't hard delete. Not a lawyer — have the privacy policy reviewed.
+- **GDPR:** store minimal (provider, external_id, optional email/name/avatar), no passwords. On account deletion **pseudonymize** public bingo contributions (cut the identity link, aggregates/leaderboard stay correct), don't hard delete — the mechanism is §12.8, because bingo is a plugin and core cannot keep that promise on its own. Not a lawyer — have the privacy policy reviewed.
 - **Security:** creator/OAuth tokens encrypted at rest. SVG sanitizing. Presigned URLs for gated audio. **Baseline security headers** (CSP, X-Content-Type-Options, Referrer-Policy). **Upload limits** (max body size; archives additionally guarded against zip-slip and zip bombs — see the stats brief). **Basic rate limiting** on auth endpoints and uploads.
 - **Deployment:** Docker Compose (app, postgres, caddy/traefik; redis from v3). Secrets via `.env`, not committed. **Backups from day one:** nightly `pg_dump` of the database (host cron or sidecar) + keeping a copy off the VPS; test a restore once.
 
