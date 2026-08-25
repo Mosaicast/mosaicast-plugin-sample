@@ -182,6 +182,7 @@ Same machinery as §6.4 (the server knows episodes and can ask plugins), extende
 - **Structured data (JSON-LD):** `PodcastSeries` on the site/feed pages, `PodcastEpisode` on episode pages — fed by the same data the OgResolver already has.
 - **Content for non-JS crawlers:** Googlebot renders JS, but many crawlers (and most AI crawlers) don't. Core renders a **simple server-side HTML content block** into the served `index.html` (episode list on feed pages; title/description/show notes on episode pages); the React shell replaces it on mount. No SSR framework — a plain template is enough.
 - **Hygiene:** `rel=canonical` (normalize filter query params — they're in the URL per §6.1, so prevent duplicate content), `hreflang` once >1 UI locale is active, `<link rel="alternate" type="application/rss+xml">` for feed discovery, and **real HTTP 404s** for unknown episodes/routes (no soft-404).
+  - **That last rule reaches into plugin subtrees, and only the plugin can enforce it.** Core knows a plugin declared a `page` slot; it cannot know that `/p/wiki/nowhere` is not a page, so every subpath answered 200 and a crawler indexed a wiki's typos and its deleted pages while `sitemap.xml` listed only the real ones. The optional **`PageRouteProvider`** (§7.4) is the plugin answering. **Absent means yes**, so a plugin that does not implement it behaves exactly as before, and a provider that throws leaves the route at 200 — a broken plugin must not be able to turn its own working pages into 404s. It is deliberately *not* folded into `ShareMetadataProvider`: a subtree legitimately holds views with nothing to describe (a search result page should not claim to be a shareable document), so "no OpenGraph" must never mean "no page".
 
 ---
 
@@ -283,6 +284,10 @@ interface SitemapProvider {          // optional extension point (§6.6); wiki i
     List<SitemapUrl> urls();         // absolute-path locs under /p/<pluginId>/…
 }
 record SitemapUrl(String loc, Instant lastModified) {}   // lastModified nullable
+
+interface PageRouteProvider {        // optional extension point (§6.6); absent ⇒ every subpath renders
+    boolean hasRoute(String subpath);   // subpath under /p/<pluginId>/; never null, empty at the root
+}
 
 interface SearchProvider {           // optional extension point (§6.7)
     List<SearchHit> search(String query, Role role, int limit);   // role is null for anonymous
