@@ -82,6 +82,86 @@ reusing `sample-highlight`, and the differences are the whole lesson:
 
 Declaring `card` is optional: declare it or omit it, but don't put the full rendering in both.
 
+## A page is not a tile — and it can have several front doors (core 0.6.15)
+Until 0.6.15 a `page` plugin owned `/p/{id}/*` and **nothing linked to it**: reachable only by typing the
+URL. `nav[]` in the manifest fixes that — a plugin declares its entrances and the shell's navigation menu
+(the hamburger, left of the brand) offers them.
+
+This plugin declares **four**, and they are the demonstration:
+
+```json
+"nav": [
+  { "path": "",          "label": "Highlights",          "icon": "star" },
+  { "path": "moments",   "label": "Key moments",         "icon": "clock" },
+  { "path": "gallery",   "label": "Highlight gallery",   "icon": "image" },
+  { "path": "unwritten", "label": "Highlights to write", "icon": "compose", "visibleTo": "podcaster" }
+]
+```
+
+**They are four views of one dataset, not four features** — everything highlighted, only the moments, only
+the pictures, and the episodes with nothing written yet. That is the shape worth copying: entrances are
+cheap, and a visitor arriving at "Key moments" has a different question than one arriving at "Gallery".
+
+Five things this exercises that a single-entry page does not:
+
+- **An entrance can be role-gated.** `unwritten` is `visibleTo: "podcaster"`, and the host resolves that
+  **server-side** — an anonymous caller is never sent the entry, not even hidden in the page source. Verified
+  against a running instance: `GET /api/plugins/navigation` returns three sample entries anonymously and
+  four to a podcaster. The component filters again for its own tab bar, because that is drawn client-side.
+- **The detail route is deliberately not an entrance.** `highlight/<slug>` is a destination — a menu cannot
+  hold one row per episode. An entry point is where someone *starts*.
+- **Declared once, rendered twice.** The same four appear in the host's menu and as this page's own tab bar;
+  sending someone back to the hamburger to change view would be worse. `frontend/src/page-entries.ts` is the
+  single source, and `page-entries.test.ts` pins `plugin.json` to it field by field — a path renamed in one
+  and not the other is a menu entry that silently lands on the fallback view.
+- **The menu label is not translatable; the tab is.** Core has no access to a plugin's catalogs, so
+  `nav[].label` is one fixed string in every language. The in-page tab uses `labelKey` and i18n. Keep the
+  manifest label short and neutral.
+- **`icon` draws from the same `--mc-icon-*` palette** as everything else (below). An unknown name never
+  rejects the plugin — core holds no icon list on purpose — so a typo is silent on both sides. The test
+  checks the names against the ones this plugin ships a rule for.
+
+**The page is its own element** (`sample-highlight-page`), not `sample-highlight` with a flag. A tile is a
+guest in someone else's layout: narrow, below the show notes, saying one thing. A page is the whole canvas.
+One component serving both is either a shouty tile or a lonely card in an ocean of white — which is what
+this page was before 2.11.0.
+
+**One request, four views.** Every view reads one backend-written document, `data/site/main/index`. A
+browser cannot assemble that listing: the doc surface is addressed by scope and key, so "every episode's
+highlight" is one request per episode. `SamplePlugin`'s scheduled pass already walks exactly that set, so it
+publishes the answer — an excerpt, the key moment, the image ref, the favourite tally — and the page costs
+one GET however long the feed is. It is declared `backendOwned` beside `stats` for the same reason: a
+derived listing that any podcaster could overwrite is a listing of whatever they felt like publishing.
+
+## A valid image, refused in one browser only
+An image upload that worked in Chromium failed in Firefox. The cause is worth knowing before you write your
+own upload, because nothing in the plugin code looks wrong:
+
+**`File.type` is not filled in the same way by every browser.** Chromium carries its own extension→MIME
+table. Firefox asks the *operating system*'s MIME database — and where that lookup fails (a sparse
+`shared-mime-info` on Linux, a missing or hijacked registry association on Windows, an extension the
+platform simply doesn't know) it hands over `File.type === ''`. `FormData` then sends the part as
+`application/octet-stream`.
+
+The host checks in this order (ARCHITECTURE §11.1): **size, declared type, actual type, quota**. The
+declared type is checked *before the bytes are read*, so a perfectly valid PNG is refused as a type the
+plugin may not store — and the sniffer that would have vindicated it never runs. Measured against a running
+core with one byte-identical PNG:
+
+| `file.type` | result |
+|---|---|
+| `image/png` | **201** stored |
+| `""` | **415** `content type 'application/octet-stream' is not one this plugin may store` |
+
+`declaredType()` in `frontend/src/highlight-doc.ts` restores the claim from the file's extension before
+uploading. **Guessing is safe here and would not be safe elsewhere:** it does not decide what the file *is* —
+the host still sniffs the leading bytes and refuses anything whose content disagrees. A wrong guess becomes
+the same 415 it would have been, never a stored file of the wrong kind. An extension nothing maps is passed
+through untouched, so the refusal keeps the host's own wording.
+
+The `accept` attribute has the same weakness — a browser filters its own picker with that same MIME
+database — so it lists extensions alongside types: `accept="image/png,…,.png,.jpg,.jpeg,.jfif,.webp"`.
+
 ## Icons come from the host, and not through `ctx` (core 0.6.15)
 `frontend/src/icons.tsx` draws the **shell's own icon set** — `--mc-icon-edit`, `--mc-icon-play`,
 `--mc-icon-star`, … (ARCHITECTURE §12.3). The delivery mechanism is the interesting part: they are plain
@@ -610,6 +690,17 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.11.0** — the plugin's **page**, and the cross-browser upload bug that had been hiding in it. Still
+  `platformApi` `0.8.0`: `nav[]` is additive manifest, and the rest is this plugin's own code.
+  - **[Four entrances, declared once](#a-page-is-not-a-tile--and-it-can-have-several-front-doors-core-0615)** —
+    `nav[]` (core 0.6.15) puts a plugin's pages in the shell's navigation menu. This one declares four views
+    over one dataset, one of them `visibleTo: "podcaster"`, and the page is now its own element rather than
+    the tile wearing a hat. A backend-written `index` doc makes all four cost a single request.
+  - **[`declaredType`](#a-valid-image-refused-in-one-browser-only)** — an image upload that worked in
+    Chromium and failed in Firefox, because `File.type` comes from the OS MIME database in one and a
+    built-in table in the other, and the host checks the *declared* type before it reads a byte.
+    Reproduced against a running core (415 → 201), fixed, and covered by `highlight-doc.test.ts`.
+  - The upload refusal's warning icon now aligns to the first line of a wrapping message.
 - **2.10.0** — the **core 0.6.15** additions, and **no `platformApi` bump**: all three are host-side or
   additive-manifest, so this still declares `0.8.0` and keeps loading everywhere. That restraint is the
   first lesson of the release — the version check is an exact `major.minor` match, so a reflexive bump

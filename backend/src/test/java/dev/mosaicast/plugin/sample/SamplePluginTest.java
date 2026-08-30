@@ -4,6 +4,8 @@
 package dev.mosaicast.plugin.sample;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -13,7 +15,9 @@ import dev.mosaicast.plugin.api.Scope;
 import dev.mosaicast.plugin.api.SitemapUrl;
 import dev.mosaicast.plugin.sample.SamplePlugin.FavouriteCount;
 import dev.mosaicast.plugin.sample.SamplePlugin.Highlight;
+import dev.mosaicast.plugin.sample.SamplePlugin.HighlightIndex;
 import dev.mosaicast.plugin.sample.SamplePlugin.HighlightStats;
+import dev.mosaicast.plugin.sample.SamplePlugin.IndexEntry;
 import dev.mosaicast.plugin.testkit.FakeFeedAccess;
 import dev.mosaicast.plugin.testkit.FakePluginContext;
 import dev.mosaicast.plugin.testkit.InMemoryDocStore;
@@ -56,7 +60,7 @@ class SamplePluginTest {
      */
     private static FakePluginContext contextEnforcingBackendOwnedKeys(String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats", "favourites");
+        InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats", "favourites", "index");
         return new FakePluginContext(store, new MapPluginConfig(), feeds, null);
     }
 
@@ -458,5 +462,79 @@ class SamplePluginTest {
         assertEquals(
                 Optional.of(new HighlightStats(1, 1, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+    }
+
+    /**
+     * The listing the plugin's own page renders from (2.11.0).
+     *
+     * <p>A browser cannot build this: the doc surface is addressed by scope and key, so "every episode's
+     * highlight" is one request per episode. The backend already walks that set on its schedule, so it
+     * publishes the answer as one document — and because it is derived, it is declared `backendOwned`, so
+     * no client can publish a listing of its own.
+     */
+    @Test
+    void publishesAnIndexOfEveryHighlightForThePage() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2", "ep-3");
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "**the drop**", "momentSeconds", 90,
+                        "image", Map.of("ref", "blob-1", "alt", "a lighthouse")));
+        ctx.store().put(Scope.episode("ep-3"), "highlight", new Highlight("no moment, no picture"));
+        // ep-2 has no highlight, so it must not appear at all.
+
+        new SamplePlugin().register(ctx);
+
+        HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
+        assertEquals(List.of("ep-1", "ep-3"), index.entries().stream().map(IndexEntry::slug).toList());
+
+        IndexEntry first = index.entries().get(0);
+        assertEquals(90, first.momentSeconds());
+        assertEquals("blob-1", first.imageRef());
+        // The excerpt is plain text: a card renders it as a string, so markdown punctuation would show
+        // through as literal asterisks rather than as emphasis.
+        assertFalse(first.excerpt().contains("*"), "excerpt must be stripped of markdown: " + first.excerpt());
+        assertTrue(first.excerpt().contains("the drop"));
+
+        IndexEntry second = index.entries().get(1);
+        assertNull(second.momentSeconds(), "an episode with no key moment carries none");
+        assertNull(second.imageRef(), "an episode with no picture carries none");
+    }
+
+    @Test
+    void indexOmitsAContentlessHighlightItJustPruned() {
+        // The prune and the listing come from the same pass on purpose. Published from a second walk, the
+        // page could list an episode whose doc this pass had already removed.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", Map.of("markdown", "   "));
+        ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("a real one"));
+
+        new SamplePlugin().register(ctx);
+
+        HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
+        assertEquals(List.of("ep-2"), index.entries().stream().map(IndexEntry::slug).toList());
+    }
+
+    @Test
+    void indexCarriesTheFavouriteTallyItAlreadyComputed() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("worth marking"));
+        ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
+
+        new SamplePlugin().register(ctx);
+
+        HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
+        assertEquals(2, index.entries().get(0).favourites());
+    }
+
+    @Test
+    void indexIsBackendOwnedLikeTheStatsBesideIt() {
+        // Same reasoning as `stats`: a shared-scope document has no owner, so anything above the write
+        // floor could otherwise replace a derived listing with one of its own choosing.
+        FakePluginContext ctx = contextEnforcingBackendOwnedKeys("ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("something"));
+
+        new SamplePlugin().register(ctx);
+
+        assertTrue(ctx.store().get(Scope.site(), "index", HighlightIndex.class).isPresent());
     }
 }

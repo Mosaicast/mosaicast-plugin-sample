@@ -63,8 +63,10 @@ describe('plugin.json ↔ bundle contract', () => {
     // A shared-scope document has no owner: authorization is per plugin, not per document, so any caller
     // above `writableBy` can overwrite a value the backend computed. `stats` and `favourites` are written by
     // SamplePlugin's scheduled pass and by nothing else, so they are declared and a client PUT/DELETE to
-    // them is a 403.
-    expect(data.backendOwned).toEqual(['stats', 'favourites']);
+    // them is a 403. `index` joined them in 2.11.0: the page's listing is derived from every episode's
+    // highlight, which only the backend can enumerate — leaving it writable would let any podcaster
+    // publish a listing of their own choosing.
+    expect(data.backendOwned).toEqual(['stats', 'favourites', 'index']);
 
     // The mirror image, and the easier mistake: declaring a key the *frontend* writes locks this plugin out
     // of its own store. Each of these is written over HTTP by a component in this bundle.

@@ -1,6 +1,6 @@
 {
   "id": "sample",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "platformApi": "0.8.0",
   "name": "Sample",
   "license": "Apache-2.0",
@@ -12,21 +12,32 @@
   },
   "frontend": {
     "entry": "sample.es.js",
-    "elements": ["sample-highlight", "sample-highlight-card", "sample-highlight-settings"]
+    "elements": [
+      "sample-highlight",
+      "sample-highlight-card",
+      "sample-highlight-page",
+      "sample-highlight-settings"
+    ]
   },
   "slots": [
     { "scope": "episode", "element": "sample-highlight-card",     "placement": "card",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "episode", "element": "sample-highlight",          "placement": "main",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "feed",    "element": "sample-highlight",          "placement": "feed",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "site",    "element": "sample-highlight",          "placement": "site",    "visibleTo": "anonymous", "order": 100 },
-    { "scope": "site",    "element": "sample-highlight",          "placement": "page",    "visibleTo": "anonymous", "order": 100 },
+    { "scope": "site",    "element": "sample-highlight-page",     "placement": "page",    "visibleTo": "anonymous", "order": 100 },
     { "scope": "site",    "element": "sample-highlight-settings", "placement": "sidebar", "visibleTo": "podcaster", "order": 100 }
+  ],
+  "nav": [
+    { "path": "",          "label": "Highlights",        "icon": "star" },
+    { "path": "moments",   "label": "Key moments",       "icon": "clock" },
+    { "path": "gallery",   "label": "Highlight gallery", "icon": "image" },
+    { "path": "unwritten", "label": "Highlights to write", "icon": "compose", "visibleTo": "podcaster" }
   ],
   "storage": "doc",
   "data": {
     "readableBy": "anonymous",
     "writableBy": "podcaster",
-    "backendOwned": ["stats", "favourites"]
+    "backendOwned": ["stats", "favourites", "index"]
   },
   "blobs": {
     "maxFileBytes": 5242880,

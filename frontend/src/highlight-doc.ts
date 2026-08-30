@@ -77,6 +77,50 @@ export function favouriteCountPath(episodeSlug: string): string {
   return `data/episode/${encodeURIComponent(episodeSlug)}/favourites`;
 }
 
+/**
+ * The image types this plugin's manifest declares, keyed by the file extension a browser might not
+ * recognise on its own. Kept beside {@link declaredType} rather than inline, because the manifest's
+ * `blobs.mimeTypes` and the editor's `accept` attribute have to agree with it.
+ */
+const EXTENSION_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  jfif: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+/**
+ * Returns `file` with a usable MIME type, deriving one from its extension when the browser supplied none.
+ *
+ * **Why this exists — a real cross-browser failure, not a hypothetical.** `File.type` is not filled in
+ * the same way everywhere: Chromium carries its own extension→type table, while Firefox asks the
+ * *operating system*'s MIME database. Where that lookup fails — a sparse `shared-mime-info` on Linux, a
+ * missing or hijacked registry association on Windows, an extension the platform simply doesn't know —
+ * Firefox hands over `File.type === ''`. `FormData` then sends the part as `application/octet-stream`,
+ * and the host refuses on the **declared** type before it ever looks at the bytes (ARCHITECTURE §11.1:
+ * size, declared type, actual type, quota — in that order). The result is a valid PNG rejected as
+ * "not one this plugin may store", in one browser only, for a file that works in the other.
+ *
+ * **Why guessing is safe here, and would not be safe anywhere else.** This does not decide what the file
+ * *is* — the host still sniffs the leading bytes and refuses anything whose content disagrees with the
+ * declared type. A wrong guess therefore turns into the same 415 it would have been, never into a stored
+ * file of the wrong kind. This only restores the claim the browser was supposed to make; the host remains
+ * the only thing that decides whether it was true.
+ *
+ * An extension nothing maps is passed through untouched, so the refusal comes from the host with its own
+ * wording rather than from a guess this plugin invented.
+ *
+ * @param file the file straight from an `<input type="file">`
+ * @returns the same file when it already carries a type, otherwise a retyped copy
+ */
+export function declaredType(file: File): File {
+  if (file.type && file.type !== 'application/octet-stream') return file;
+  const extension = file.name.includes('.') ? file.name.split('.').pop()!.toLowerCase() : '';
+  const mime = EXTENSION_TYPES[extension];
+  return mime ? new File([file], file.name, { type: mime, lastModified: file.lastModified }) : file;
+}
+
 /** `90` -> `"1:30"`. Negative input floors to `0:00`, matching the clamp the edit modal applies on save. */
 export function formatTime(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));

@@ -5,6 +5,7 @@ import { defineMosaicastElement } from '@mosaicast/plugin-sdk';
 import { createRoot } from 'react-dom/client';
 import { Highlight } from './components/Highlight';
 import { HighlightCard } from './components/HighlightCard';
+import { HighlightPage } from './components/HighlightPage';
 import { AdminSettings } from './components/AdminSettings';
 
 defineMosaicastElement({
@@ -23,6 +24,18 @@ defineMosaicastElement({
   render: ({ ctx, root }) => {
     const reactRoot = createRoot(root);
     reactRoot.render(<HighlightCard ctx={ctx} />);
+    return () => reactRoot.unmount();
+  },
+});
+
+// The site/page slot — everything under /p/sample/, including the four entrances the manifest's `nav[]`
+// offers to the shell's navigation menu. A page is not a tile, which is why it is not `sample-highlight`
+// with a flag; see HighlightPage.tsx.
+defineMosaicastElement({
+  tag: 'sample-highlight-page',
+  render: ({ ctx, root }) => {
+    const reactRoot = createRoot(root);
+    reactRoot.render(<HighlightPage ctx={ctx} />);
     return () => reactRoot.unmount();
   },
 });
