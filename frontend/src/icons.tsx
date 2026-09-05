@@ -6,48 +6,43 @@
  *
  * This is the **third** channel a plugin shares with the shell, and the one that costs the least:
  *
- * - `ctx.api` / `ctx.blobs` — data, over HTTP, versioned by `platformApi`.
+ * - `ctx.api` / `ctx.docs` / `ctx.blobs` — data, over HTTP, versioned by `platformApi`.
  * - `ctx.theme` — colours, which the SDK injects into the shadow root as `--mc-bg`, `--mc-accent`, ….
  * - **`--mc-icon-*` — artwork, which nothing injects.** The shell declares these on `:root`, custom
  *   properties inherit *through* the shadow boundary, and so a Web Component reads them with **no SDK
- *   import, no `platformApi` bump and no version skew**. A plugin built against SDK 0.8.0 picks up an
+ *   import, no `platformApi` bump and no version skew**. A plugin built against SDK 0.9.1 picks up an
  *   icon the day a later core release publishes it. That is why they are not on `ctx`: putting them
  *   there would have made every new icon an SDK release and a manifest bump for every plugin.
  *
- * Three rules come out of that, and all three are encoded below rather than left to a comment:
+ * ## What changed in SDK 0.9.0, and what did not
  *
- * 1. **Mask, never `background-image`.** `background: currentColor` behind a mask makes the icon take
- *    the caller's own colour, so it re-themes with the text beside it. A `background-image` would bake
- *    in whatever the artwork was drawn as (black), which is invisible on a dark `--mc-surface`.
- * 2. **Every reference needs a fallback, and `none` is the wrong one.** An unresolved `var()` makes the
- *    declaration invalid at computed-value time, so `mask-image` falls back to its initial `none` — an
- *    unmasked element that paints `currentColor` across its whole box. The failure mode of a missing
- *    icon is therefore a *solid square*, not a blank space. {@link BLANK} masks with an empty SVG so a
- *    host that predates the icon set (or drops a name, which the contract forbids but reality permits)
- *    renders nothing and leaves the label beside it doing the work.
- * 3. **Do not declare your own `--mc-*`.** That prefix is the host's namespace, and a plugin defining
- *    into it would shadow the real token for its own subtree the moment core publishes one. This
- *    plugin's private property is `--sample-icon-blank`.
+ * The three rules that fall out of the design above — mask rather than `background-image`, a *blank image*
+ * fallback rather than `mask-image: none`, and never declaring into the host's `--mc-*` namespace — used to
+ * be hand-written here, in about sixty lines that every plugin copied and one of them always got wrong.
+ * {@link iconCss} owns them now. This module keeps only the two things that are genuinely local:
  *
- * The names are a contract — core adds freely and renames never — so referencing one is safe forever,
- * and a name core has not published yet simply renders as nothing (rule 2) instead of breaking a tile.
+ * 1. **A closed {@link ICON_NAMES} list**, so `<Icon name="edt" />` is a compile error. The SDK's
+ *    `KnownIconName` deliberately stays *open* (`string & {}`) because closing it would pin the icon set to
+ *    an SDK version and undo the whole no-skew property above. A plugin narrowing it for its own call sites
+ *    is the right place for that check — the SDK cannot do it without taking the property away from
+ *    everyone.
+ * 2. **Layout that is this plugin's taste, not the contract's** — see {@link ICON_LAYOUT_CSS}.
+ *
+ * The failure mode worth remembering even though the SDK now handles it: an unresolved `var()` invalidates
+ * the declaration at computed-value time, so `mask-image` falls back to its *initial* `none` and an
+ * unmasked element paints `currentColor` across its whole box. **A missing icon renders as a solid square,
+ * not as blank space** — which is why `iconCss` emits a blank SVG and not `none`. A name core has not
+ * published yet therefore renders as nothing and leaves the label beside it doing the work.
  */
 
-/**
- * An empty SVG, used as the fallback mask for every icon.
- *
- * Masking with a document that draws nothing hides the element; falling through to `mask-image: none`
- * would show it, filled edge to edge with `currentColor`. See rule 2 above — this constant is the whole
- * difference between "old host, no icon" and "old host, black square in every button".
- */
-const BLANK = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E\")";
+import { iconCss, type KnownIconName } from '@mosaicast/plugin-sdk';
 
 /**
  * The host icons this plugin draws, in the shell's own vocabulary (its `frontend/dev/icons.txt`).
  *
- * Deliberately a closed set rather than an open `string`: a typo'd token silently renders nothing
- * (rule 2), which is the kind of bug that ships. Naming them here makes `<Icon name="edt" />` a
- * compile error and gives {@link ICON_CSS} its list.
+ * Deliberately a closed set rather than an open `string`: a typo'd token silently renders nothing, which is
+ * the kind of bug that ships. Naming them here makes `<Icon name="edt" />` a compile error and gives
+ * {@link ICON_CSS} its list.
  */
 export const ICON_NAMES = [
   'arrow-left',
@@ -57,46 +52,44 @@ export const ICON_NAMES = [
   'delete',
   'edit',
   'image',
+  'info',
   'pin',
   'play',
   'save',
   'settings',
   'share-out',
+  'sort',
   'star',
   'star-on',
+  'tag',
+  'translate',
   'upload',
   'warning',
-] as const;
+] as const satisfies readonly KnownIconName[];
 
 /** One of the host icons {@link ICON_NAMES} declares. */
 export type IconName = (typeof ICON_NAMES)[number];
 
 /**
+ * Layout this plugin wants on top of the SDK's mechanics.
+ *
+ * `iconCss` emits sizing in `em` and the masking rules; it does not — and should not — decide that an icon
+ * must not shrink inside a flex row, or how far it sits below the baseline of the text beside it. Those are
+ * per-plugin taste, so they live here rather than being smuggled into the shared helper.
+ */
+const ICON_LAYOUT_CSS = `.mc-icon { flex: none; vertical-align: -0.125em; }`;
+
+/**
  * The stylesheet behind {@link Icon} — concatenate it into a component's own `<style>`.
  *
  * Shipped as a string rather than a CSS file because each of this plugin's elements renders into its own
- * shadow root: a bundled stylesheet would land in the host document, where it could not reach any of them.
+ * shadow root: **a bundled stylesheet lands in the host document, where it cannot reach any shadow root**,
+ * and silently does nothing. That is the thing everyone tries first.
  *
- * `em` sizing throughout, so an icon scales with whatever text it sits beside — a `0.75rem` card badge
- * and a full-size button get proportionate icons without either one naming a pixel size.
+ * `em` sizing throughout, so an icon scales with whatever text it sits beside — a `0.75rem` card badge and
+ * a full-size button get proportionate icons without either one naming a pixel size.
  */
-export const ICON_CSS = `
-  .mcIcon {
-    --sample-icon-blank: ${BLANK};
-    display: inline-block;
-    flex: none;
-    width: 1em;
-    height: 1em;
-    vertical-align: -0.125em;
-    mask-size: contain;
-    mask-repeat: no-repeat;
-    mask-position: center;
-    background: currentColor;
-  }
-${ICON_NAMES.map((name) => `  .mcIcon--${name} { mask-image: var(--mc-icon-${name}, var(--sample-icon-blank)); }`).join(
-  '\n',
-)}
-`;
+export const ICON_CSS = `${iconCss(ICON_NAMES, { className: 'mc-icon' })}\n${ICON_LAYOUT_CSS}`;
 
 /**
  * One host icon, as a decorative inline element.
@@ -109,5 +102,5 @@ ${ICON_NAMES.map((name) => `  .mcIcon--${name} { mask-image: var(--mc-icon-${nam
  * @param name the host icon to draw; see {@link ICON_NAMES}
  */
 export function Icon({ name }: { name: IconName }) {
-  return <span className={`mcIcon mcIcon--${name}`} aria-hidden="true" />;
+  return <span className={`mc-icon mc-icon-${name}`} aria-hidden="true" />;
 }

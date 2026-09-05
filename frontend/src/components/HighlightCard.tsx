@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { makeI18n } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
-import { formatTime, highlightDocPath, type HighlightDoc } from '../highlight-doc';
+import { HIGHLIGHT_KEY, type HighlightDoc } from '../highlight-doc';
 
 /**
  * The plugin's `episode`/`card` slot — the compact one-liner shown on an episode's **feed card**.
@@ -34,12 +34,21 @@ export function HighlightCard({ ctx }: { ctx: PluginContext }) {
   useEffect(() => () => i18n.dispose(), [i18n]);
   void locale; // re-render on locale change; i18n.t reads the current catalog internally
 
-  const [highlight, setHighlight] = useState<HighlightDoc | undefined>(undefined);
+  const [highlight, setHighlight] = useState<HighlightDoc | null>(null);
   useEffect(() => {
-    ctx.api
-      .get<HighlightDoc>(highlightDocPath(ctx.scope.type, ctx.scope.id))
+    // `ctx.docs.get` resolves **null** when nothing is stored, so absence is an answer rather than a
+    // rejection (SDK 0.9.0). The `.catch(() => undefined)` this used to end with swallowed the 500 and the
+    // 403 alongside the 404; here a real failure logs to the host and the card stays away, which is the
+    // right outcome for a badge on somebody else's feed list but is now a *decision* rather than an
+    // accident.
+    ctx.docs
+      .get<HighlightDoc>(ctx.scope, HIGHLIGHT_KEY)
       .then(setHighlight)
-      .catch(() => setHighlight(undefined));
+      .catch((e: unknown) => {
+        setHighlight(null);
+        ctx.log('warn', `highlight badge unavailable for ${ctx.scope.type} ${ctx.scope.id}`);
+        void e;
+      });
   }, [ctx]);
 
   // A doc whose markdown is blank is contentless — the backend prunes those, but this must not badge an
@@ -77,7 +86,9 @@ export function HighlightCard({ ctx }: { ctx: PluginContext }) {
         highlight.momentSeconds != null && (
           <>
             <span className="sep">·</span>
-            <span className="moment">{i18n.t('card.moment', { time: formatTime(highlight.momentSeconds) })}</span>
+            {/* i18n.duration (SDK 0.9.0) replaces this plugin's own `90 -> "1:30"` helper — and unlike it,
+                renders in the active locale's digits. */}
+            <span className="moment">{i18n.t('card.moment', { time: i18n.duration(highlight.momentSeconds) })}</span>
           </>
         )
       )}

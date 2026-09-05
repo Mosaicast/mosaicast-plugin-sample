@@ -4,9 +4,9 @@
 import { describe, expect, it } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { makeMockCtx } from '@mosaicast/plugin-sdk/testing';
+import { makeMockCtx, makeMockDocs } from '@mosaicast/plugin-sdk/testing';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
-import { flush } from '../test-utils';
+import { docsRecording, flush } from '../test-utils';
 import { HighlightCard } from './HighlightCard';
 
 function mount(ctx: PluginContext) {
@@ -22,7 +22,7 @@ function mount(ctx: PluginContext) {
 function cardCtx(highlight?: unknown) {
   return makeMockCtx({
     scope: { type: 'episode', id: 'ep-1' },
-    ...(highlight === undefined ? {} : { apiResponses: { 'get data/episode/ep-1/highlight': highlight } }),
+    ...(highlight === undefined ? {} : { docs: makeMockDocs({ 'data/episode/ep-1/highlight': highlight }) }),
   });
 }
 
@@ -76,12 +76,14 @@ describe('HighlightCard — the episode/card compact badge', () => {
   });
 
   it('makes exactly one request — no settings fetch, since this mounts once per episode in a list', async () => {
-    const ctx = cardCtx({ markdown: 'A highlight' });
+    const docs = docsRecording(makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'A highlight' } }));
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, docs });
     mount(ctx);
     await flush();
 
-    expect(ctx.api.calls).toEqual([
-      { method: 'get', path: 'data/episode/ep-1/highlight', body: undefined },
-    ]);
+    // One read, of one document. The badge deliberately skips the site-wide `settings` doc the full
+    // tile reads, because this component mounts once per episode in a feed list and a second fetch each
+    // would be N extra round trips for a heading override it does not render anyway.
+    expect(docs.reads).toEqual(['episode:ep-1/highlight']);
   });
 });
