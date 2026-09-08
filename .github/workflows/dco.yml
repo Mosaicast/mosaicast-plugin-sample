@@ -44,3 +44,37 @@ jobs:
             exit 1
           fi
           echo "All commits signed off. ✅"
+
+      # A `Claude-Session:` trailer or link only opens for its author, so in a public history it is
+      # noise on every agent-assisted PR. `.claude/settings.json` turns it off at the source for
+      # Claude Code >= 2.1.183; this catches older clients and other agents. The id is part of the
+      # pattern on purpose, so prose about the link (this file, a PR describing it) does not match.
+      - name: No agent session links in commits or the PR description
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          pattern='claude\.ai/code/session_[A-Za-z0-9_-]{6,}'
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          found=0
+          for c in $(git rev-list "$base".."$head"); do
+            if git show -s --format=%B "$c" | grep -qiE "$pattern"; then
+              echo "::error::Commit $c carries an agent session link."
+              git show -s --format='  %h %s' "$c"
+              found=1
+            fi
+          done
+          if printf '%s' "$PR_BODY" | grep -qiE "$pattern"; then
+            echo "::error::The PR description carries an agent session link. Remove that line."
+            found=1
+          fi
+          if [ "$found" -ne 0 ]; then
+            echo ""
+            echo "Session-link check failed."
+            echo "Agent attribution is welcome — keep the trailer, drop the link."
+            echo 'Turn it off once:    .claude/settings.json -> { "attribution": { "sessionUrl": false } }'
+            echo "Fix the last commit: git commit --amend && git push --force-with-lease"
+            exit 1
+          fi
+          echo "No session links. ✅"
