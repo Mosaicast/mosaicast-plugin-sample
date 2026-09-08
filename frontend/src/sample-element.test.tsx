@@ -3,13 +3,13 @@
 
 import { describe, expect, it } from 'vitest';
 import { act } from 'react';
-import { makeMockCtx } from '@mosaicast/plugin-sdk/testing';
+import { makeMockCtx, makeMockDocs } from '@mosaicast/plugin-sdk/testing';
 import { PLATFORM_API_VERSION } from '@mosaicast/plugin-sdk';
 import type { PluginContext, PluginDataDeclaration } from '@mosaicast/plugin-sdk';
-import { flush } from './test-utils';
+import { flush, mockUser } from './test-utils';
 import { MODAL_PORTAL_ATTR } from './components/HighlightModal';
 import { SETTINGS_PATH } from './components/AdminSettings';
-import { favouriteDocPath, highlightDocPath } from './highlight-doc';
+import { HIGHLIGHT_KEY, favouriteKey } from './highlight-doc';
 import manifest from '../../plugin.json';
 import './sample-element';
 
@@ -65,16 +65,20 @@ describe('plugin.json ↔ bundle contract', () => {
     // SamplePlugin's scheduled pass and by nothing else, so they are declared and a client PUT/DELETE to
     // them is a 403. `index` joined them in 2.11.0: the page's listing is derived from every episode's
     // highlight, which only the backend can enumerate — leaving it writable would let any podcaster
-    // publish a listing of their own choosing.
-    expect(data.backendOwned).toEqual(['stats', 'favourites', 'index']);
+    // publish a listing of their own choosing. `drafts` joined them in 2.13.0 for the sharpest version of
+    // the same argument: the edit modal offers those machine translations to a podcaster as suggestions,
+    // so an undeclared key would let anyone above `writableBy` plant text the editor then presents in
+    // good faith as something the site's own translation provider produced. `announced` joined them in
+    // 2.15.0 with a third argument again: it is not content but the bookkeeping that decides whether a
+    // notification goes out (SDK 0.14.0, §17), so a client able to write it could silence an announcement,
+    // or clear it and make the backend announce every translation to every favouriter a second time.
+    expect(data.backendOwned).toEqual(['stats', 'favourites', 'index', 'drafts', 'announced']);
 
     // The mirror image, and the easier mistake: declaring a key the *frontend* writes locks this plugin out
     // of its own store. Each of these is written over HTTP by a component in this bundle.
-    const clientWritten = [
-      keyOf(highlightDocPath('episode', 'ep-1')),
-      keyOf(SETTINGS_PATH),
-      keyOf(favouriteDocPath('ep-1')),
-    ];
+    // `ctx.docs` takes keys directly now, so two of these are the constants themselves rather than the
+    // last segment of a path this plugin had to build.
+    const clientWritten = [HIGHLIGHT_KEY, keyOf(SETTINGS_PATH), favouriteKey('ep-1')];
     const covers = (pattern: string, key: string): boolean =>
       pattern.endsWith('*') ? key.startsWith(pattern.slice(0, -1)) : pattern === key;
     for (const key of clientWritten) {
@@ -142,7 +146,7 @@ describe('sample-highlight custom element', () => {
     act(() => {
       el.ctx = makeMockCtx({
         scope: { type: 'episode', id: 'ep-1' },
-        apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'First note' } },
+        docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'First note' } }),
       });
     });
     await flush();
@@ -151,7 +155,7 @@ describe('sample-highlight custom element', () => {
     act(() => {
       el.ctx = makeMockCtx({
         scope: { type: 'episode', id: 'ep-2' },
-        apiResponses: { 'get data/episode/ep-2/highlight': { markdown: 'Second note' } },
+        docs: makeMockDocs({ 'data/episode/ep-2/highlight': { markdown: 'Second note' } }),
       });
     });
     await flush();
@@ -170,7 +174,7 @@ describe('sample-highlight custom element', () => {
     act(() => {
       el.ctx = makeMockCtx({
         scope: { type: 'site', id: 'main' },
-        user: { id: 'u1', role: 'podcaster' },
+        user: mockUser('u1', 'podcaster'),
       });
     });
     await flush();

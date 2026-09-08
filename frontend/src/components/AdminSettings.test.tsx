@@ -4,10 +4,9 @@
 import { describe, expect, it } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { makeMockCtx } from '@mosaicast/plugin-sdk/testing';
-import type { MockApiClient } from '@mosaicast/plugin-sdk/testing';
+import { apiError, makeMockCtx } from '@mosaicast/plugin-sdk/testing';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
-import { flush } from '../test-utils';
+import { flush, mockUser } from '../test-utils';
 import { AdminSettings } from './AdminSettings';
 
 function mount(ctx: PluginContext) {
@@ -27,7 +26,7 @@ describe('AdminSettings — the plugin-owned site/sidebar podcaster settings pan
   it('loads the current heading override and font from the store', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: mockUser('u1', 'podcaster'),
       apiResponses: { 'get data/site/main/settings': { headingOverride: '🎙️ Producer’s Pick', fontFamily: 'serif' } },
     });
     const container = mount(ctx);
@@ -42,7 +41,7 @@ describe('AdminSettings — the plugin-owned site/sidebar podcaster settings pan
   it('writes the edited settings back via ctx.api.put on Save', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: mockUser('u1', 'podcaster'),
     });
     const container = mount(ctx);
     await flush();
@@ -65,6 +64,8 @@ describe('AdminSettings — the plugin-owned site/sidebar podcaster settings pan
     });
     await flush();
 
+    // Still asserted on `ctx.api.calls`, because this component deliberately stays on the raw client —
+    // it is the sample's demonstration that `ctx.docs` is sugar over a surface that did not go away.
     expect(ctx.api.calls).toContainEqual({
       method: 'put',
       path: 'data/site/main/settings',
@@ -75,18 +76,16 @@ describe('AdminSettings — the plugin-owned site/sidebar podcaster settings pan
   });
 
   it('logs a warning and does not show "Saved" when the save fails', async () => {
-    const mockApi: MockApiClient = {
-      calls: [],
-      responses: {},
-      get: () => Promise.resolve(undefined as never),
-      post: () => Promise.reject(new Error('nope')),
-      put: () => Promise.reject(new Error('network down')),
-      delete: () => Promise.resolve(undefined as never),
-    };
+    // `apiError` (SDK 0.9.0) is the canned-failure marker for the raw client — drop one into a response
+    // key and the call rejects with a PluginApiError carrying that status, instead of the hand-built
+    // MockApiClient literal this used to be. That literal also broke on every SDK release that added a
+    // method to the interface, which is the argument for the double over rolling your own.
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      user: { id: 'u1', role: 'podcaster' },
-      api: mockApi,
+      user: mockUser('u1', 'podcaster'),
+      apiResponses: {
+        'put data/site/main/settings': apiError(403, { detail: 'writableBy is podcaster on this install' }),
+      },
     });
     const container = mount(ctx);
     await flush();
@@ -98,6 +97,6 @@ describe('AdminSettings — the plugin-owned site/sidebar podcaster settings pan
     });
 
     expect(container.textContent).not.toContain('Saved');
-    expect(ctx.logs).toContainEqual({ level: 'warn', message: 'site highlight settings save failed: network down' });
+    expect(ctx.logs).toContainEqual({ level: 'warn', message: 'site highlight settings save failed' });
   });
 });

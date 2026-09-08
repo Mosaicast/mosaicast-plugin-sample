@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.11.0",
-  "platformApi": "0.8.0",
+  "version": "2.15.0",
+  "platformApi": "0.14.0",
   "name": "Sample",
   "license": "Apache-2.0",
   "author": "The Mosaicast Authors",
@@ -37,12 +37,27 @@
   "data": {
     "readableBy": "anonymous",
     "writableBy": "podcaster",
-    "backendOwned": ["stats", "favourites", "index"]
+    "backendOwned": ["stats", "favourites", "index", "drafts", "announced"]
+  },
+  "identity": {
+    "resolvesUsers": true
+  },
+  "notifications": {
+    "sends": true,
+    "perUserPerDay": 2
   },
   "blobs": {
     "maxFileBytes": 5242880,
     "quotaBytes": 268435456,
     "mimeTypes": ["image/png", "image/jpeg", "image/webp"]
+  },
+  "tags": {
+    "readsVocabulary": true,
+    "writesEpisodes": false
+  },
+  "external": {
+    "kinds": ["translation"],
+    "usedBy": "podcaster"
   },
   "config": {
     "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }

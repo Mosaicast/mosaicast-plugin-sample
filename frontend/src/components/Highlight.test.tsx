@@ -4,12 +4,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { makeMockCtx, makeMockConsent, makeMockBlobs } from '@mosaicast/plugin-sdk/testing';
-import type { MockApiClient, MockBlobClient } from '@mosaicast/plugin-sdk/testing';
+import { makeMockCtx, makeMockConsent, makeMockBlobs, makeMockDocs, makeMockFeeds, makeMockTags } from '@mosaicast/plugin-sdk/testing';
+import type { MockBlobClient, MockDocClient } from '@mosaicast/plugin-sdk/testing';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
-import { flush } from '../test-utils';
+import { docsFailing, docsRecording, flush, hostError, mockUser } from '../test-utils';
 import { Highlight } from './Highlight';
 import { MODAL_PORTAL_ATTR } from './HighlightModal';
+
+/**
+ * What the mock doc store currently holds, keyed `"<partition>/<key>"`.
+ *
+ * The doc double replaces the recorded `ctx.api.calls` these tests used to assert on, and asserting on
+ * *state* rather than on a call is the better test anyway: it survives the component batching two writes
+ * into one, or reordering them, and it fails when a write lands somewhere other than where it was aimed.
+ */
+const storedIn = (ctx: PluginContext) => (ctx.docs as MockDocClient).stored;
 
 function mount(ctx: PluginContext) {
   const container = document.createElement('div');
@@ -57,9 +66,9 @@ describe('Highlight — episode scope', () => {
   it('renders sanitized markdown when a highlight exists', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: {
-        'get data/episode/ep-1/highlight': { markdown: '**Great** cliffhanger! <script>alert(1)</script>' },
-      },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': { markdown: '**Great** cliffhanger! <script>alert(1)</script>' },
+      }),
     });
 
     const container = mount(ctx);
@@ -89,7 +98,7 @@ describe('Highlight — episode scope', () => {
     expect(findEditButton(anon)).toBeUndefined();
 
     const fan = mount(
-      makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: { id: 'u1', role: 'fan' } }),
+      makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: mockUser('u1', 'fan') }),
     );
     await flush();
     expect(findEditButton(fan)).toBeUndefined();
@@ -98,8 +107,8 @@ describe('Highlight — episode scope', () => {
   it('shows the Edit button for podcaster and admin users and saves via ctx.api.put', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Original text' } },
+      user: mockUser('u1', 'podcaster'),
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Original text' } }),
     });
 
     const container = mount(ctx);
@@ -128,29 +137,21 @@ describe('Highlight — episode scope', () => {
     });
     await flush();
 
-    expect(ctx.api.calls).toContainEqual({
-      method: 'put',
-      path: 'data/episode/ep-1/highlight',
-      body: { markdown: 'Updated highlight' },
-    });
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toEqual({ markdown: 'Updated highlight', authorId: 'u1' });
     // Modal (and its portal host) is gone after a successful save.
     expect(findModalShadowRoot()).toBeNull();
-    expect(ctx.logs).toContainEqual({ level: 'info', message: 'highlight saved at data/episode/ep-1/highlight' });
+    expect(ctx.logs).toContainEqual({ level: 'info', message: 'highlight saved for episode ep-1' });
   });
 
-  it('logs a warning and keeps the modal open when the save fails', async () => {
-    const mockApi: MockApiClient = {
-      calls: [],
-      responses: {},
-      get: () => Promise.resolve(undefined as never),
-      post: () => Promise.reject(new Error('nope')),
-      put: () => Promise.reject(new Error('network down')),
-      delete: () => Promise.resolve(undefined as never),
-    };
+  it('shows the refusal and keeps the modal open when the save fails', async () => {
+    // A 403 with the host's own problem detail — which is the case worth picking, because it is the one
+    // the contract deliberately words apart from the *other* 403 (the write floor vs. a `backendOwned`
+    // key). Before SDK 0.9.0 the rejection was untyped and a plugin could not tell them apart, so both
+    // became the same silent log line and a Save button that appeared to work.
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      api: mockApi,
+      user: mockUser('u1', 'podcaster'),
+      docs: docsFailing(makeMockDocs(), 'put', hostError(403, 'this key is written by the plugin backend')),
     });
 
     const container = mount(ctx);
@@ -172,9 +173,13 @@ describe('Highlight — episode scope', () => {
 
     expect(ctx.logs).toContainEqual({
       level: 'warn',
-      message: 'highlight save at data/episode/ep-1/highlight failed: network down',
+      message: 'highlight save for episode ep-1 failed',
     });
     expect(findModalShadowRoot()).not.toBeNull();
+    // The point of the release: the podcaster is *told*, in the modal they are still standing in, and the
+    // host's own wording for the refusal is carried through rather than being flattened into "failed".
+    expect(modal.textContent).toContain('The site refused this request.');
+    expect(modal.textContent).toContain('this key is written by the plugin backend');
 
     // The modal portals to document.body (see findModalShadowRoot), so leaving it open here would leak
     // into the next test's global lookup — close it now that the assertion above is done.
@@ -188,8 +193,8 @@ describe('Highlight — episode scope', () => {
   it('clamps a negative key moment to 0 instead of storing a seek to a negative offset', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } },
+      user: mockUser('u1', 'podcaster'),
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The drop' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -203,33 +208,43 @@ describe('Highlight — episode scope', () => {
     });
     await clickButton(modal, 'Save');
 
-    expect(ctx.api.calls).toContainEqual({
-      method: 'put',
-      path: 'data/episode/ep-1/highlight',
-      body: { markdown: 'The drop', momentSeconds: 0 },
-    });
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toEqual({ markdown: 'The drop', momentSeconds: 0, authorId: 'u1' });
   });
 
   it('omits momentSeconds entirely when the field is left blank or unparseable', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } },
+      user: mockUser('u1', 'podcaster'),
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The drop' } }),
     });
     const container = mount(ctx);
     await flush();
     const modal = await openEditor(container);
     await clickButton(modal, 'Save');
 
-    expect(ctx.api.calls).toContainEqual({
-      method: 'put',
-      path: 'data/episode/ep-1/highlight',
-      body: { markdown: 'The drop' },
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toEqual({ markdown: 'The drop', authorId: 'u1' });
+  });
+
+  it('credits whoever wrote the highlight, not whoever last edited it (SDK 0.13.0)', async () => {
+    // Preserve-or-set. A second podcaster fixing a typo is not the author, and `ctx.users` resolves the
+    // stored id at render — so overwriting here would quietly reassign the byline on every save.
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: mockUser('u2', 'podcaster'),
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': { markdown: 'The drop', authorId: 'u1' },
+      }),
     });
+    const container = mount(ctx);
+    await flush();
+    const modal = await openEditor(container);
+    await clickButton(modal, 'Save');
+
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toEqual({ markdown: 'The drop', authorId: 'u1' });
   });
 
   it('names the dialog, focuses the textarea on open and restores focus to Edit on close', async () => {
-    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: { id: 'u1', role: 'podcaster' } });
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: mockUser('u1', 'podcaster') });
     const container = mount(ctx);
     await flush();
     const editButton = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Edit')!;
@@ -250,8 +265,8 @@ describe('Highlight — episode scope', () => {
   it('removes the highlight via ctx.api.delete after the confirm step', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Delete me' } },
+      user: mockUser('u1', 'podcaster'),
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Delete me' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -259,26 +274,22 @@ describe('Highlight — episode scope', () => {
 
     // One click arms the confirm; it does not delete anything yet.
     await clickButton(modal, 'Remove');
-    expect(ctx.api.calls.some((c) => c.method === 'delete')).toBe(false);
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toBeDefined();
     expect(modal.textContent).toContain('Remove this highlight permanently?');
 
     await clickButton(modal, 'Yes, remove');
 
-    expect(ctx.api.calls).toContainEqual({
-      method: 'delete',
-      path: 'data/episode/ep-1/highlight',
-      body: undefined,
-    });
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toBeUndefined();
     expect(findModalShadowRoot()).toBeNull();
     expect(container.textContent).toContain('No highlight yet.');
-    expect(ctx.logs).toContainEqual({ level: 'info', message: 'highlight removed at data/episode/ep-1/highlight' });
+    expect(ctx.logs).toContainEqual({ level: 'info', message: 'highlight removed for episode ep-1' });
   });
 
   it('backs out of the confirm step without deleting', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Keep me' } },
+      user: mockUser('u1', 'podcaster'),
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Keep me' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -287,7 +298,7 @@ describe('Highlight — episode scope', () => {
     await clickButton(modal, 'Remove');
     await clickButton(modal, 'Cancel');
 
-    expect(ctx.api.calls.some((c) => c.method === 'delete')).toBe(false);
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toBeDefined();
     // Back to the normal action row, modal still open.
     expect(modal.textContent).toContain('Save');
     expect(findModalShadowRoot()).not.toBeNull();
@@ -297,7 +308,7 @@ describe('Highlight — episode scope', () => {
   });
 
   it('offers no Remove button when there is nothing stored yet', async () => {
-    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: { id: 'u1', role: 'podcaster' } });
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: mockUser('u1', 'podcaster') });
     const container = mount(ctx);
     await flush();
     const modal = await openEditor(container);
@@ -307,19 +318,19 @@ describe('Highlight — episode scope', () => {
     await clickButton(modal, 'Cancel');
   });
 
-  it('logs a warning and keeps the modal open when the removal fails', async () => {
-    const mockApi: MockApiClient = {
-      calls: [],
-      responses: {},
-      get: () => Promise.resolve({ markdown: 'Delete me' } as never),
-      post: () => Promise.reject(new Error('nope')),
-      put: () => Promise.reject(new Error('nope')),
-      delete: () => Promise.reject(new Error('network down')),
-    };
+  it('shows the failure and keeps the modal open when the removal fails', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
-      api: mockApi,
+      user: mockUser('u1', 'podcaster'),
+      // A 500 rather than a refusal: the read still works, so the modal loads and only the delete fails.
+      // `error.unavailable` is what a status the plugin has no specific branch for renders as — including
+      // the network failure that carries no status at all, which is why `isPluginApiError` is a guard and
+      // not an assumption.
+      docs: docsFailing(
+        makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Delete me' } }),
+        'remove',
+        hostError(500),
+      ),
     });
     const container = mount(ctx);
     await flush();
@@ -330,9 +341,10 @@ describe('Highlight — episode scope', () => {
 
     expect(ctx.logs).toContainEqual({
       level: 'warn',
-      message: 'highlight removal at data/episode/ep-1/highlight failed: network down',
+      message: 'highlight removal for episode ep-1 failed',
     });
     expect(findModalShadowRoot()).not.toBeNull();
+    expect(modal.textContent).toContain('This could not be loaded right now.');
 
     // Portal lives on document.body — close it so it can't leak into the next test's global lookup.
     await clickButton(modal, 'Cancel');
@@ -342,7 +354,7 @@ describe('Highlight — episode scope', () => {
   it('closes the modal without saving on Cancel', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'admin' },
+      user: mockUser('u1', 'admin'),
     });
     const container = mount(ctx);
     await flush();
@@ -364,7 +376,7 @@ describe('Highlight — episode scope', () => {
     await flush();
 
     expect(findModalShadowRoot()).toBeNull();
-    expect(ctx.api.calls.some((c) => c.method === 'put')).toBe(false);
+    expect(storedIn(ctx)['data/episode/ep-1/highlight']).toBeUndefined();
   });
 });
 
@@ -372,7 +384,7 @@ describe('Highlight — feed (podcast) scope', () => {
   it('addresses the feed-scoped doc and does not show episode stats', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'feed', id: 'news' },
-      apiResponses: { 'get data/feed/news/highlight': { markdown: 'Weekly news roundup' } },
+      docs: makeMockDocs({ 'data/feed/news/highlight': { markdown: 'Weekly news roundup' } }),
     });
 
     const container = mount(ctx);
@@ -387,46 +399,46 @@ describe('Highlight — site scope', () => {
   it('shows the backend-computed highlighted-episode stat, including the key-moment count', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      apiResponses: {
-        'get data/site/main/highlight': { markdown: 'Welcome to the show' },
-        'get data/site/main/stats': { totalEpisodes: 12, highlightedEpisodes: 3, episodesWithMoment: 2 },
-      },
+      docs: makeMockDocs({
+        'data/site/main/highlight': { markdown: 'Welcome to the show' },
+        'data/site/main/stats': { totalEpisodes: 12, highlightedEpisodes: 3, episodesWithMoment: 2 },
+      }),
     });
 
     const container = mount(ctx);
     await flush();
 
     expect(container.textContent).toContain('3 of 12 episodes highlighted');
-    expect(container.textContent).toContain('2 with a key moment');
+    expect(container.textContent).toContain('2 with key moments');
   });
 
   it('adds the site-wide favourite total once visitors have marked anything', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      apiResponses: {
-        'get data/site/main/highlight': { markdown: 'Welcome to the show' },
-        'get data/site/main/stats': {
+      docs: makeMockDocs({
+        'data/site/main/highlight': { markdown: 'Welcome to the show' },
+        'data/site/main/stats': {
           totalEpisodes: 12,
           highlightedEpisodes: 3,
           episodesWithMoment: 2,
           totalFavourites: 9,
         },
-      },
+      }),
     });
 
     const container = mount(ctx);
     await flush();
 
-    expect(container.textContent).toContain('9 favourite(s) from listeners');
+    expect(container.textContent).toContain('9 favourites from listeners');
   });
 
   it('omits the key-moment sentence when no highlighted episode has one', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      apiResponses: {
-        'get data/site/main/highlight': { markdown: 'Welcome to the show' },
-        'get data/site/main/stats': { totalEpisodes: 12, highlightedEpisodes: 3, episodesWithMoment: 0 },
-      },
+      docs: makeMockDocs({
+        'data/site/main/highlight': { markdown: 'Welcome to the show' },
+        'data/site/main/stats': { totalEpisodes: 12, highlightedEpisodes: 3, episodesWithMoment: 0 },
+      }),
     });
 
     const container = mount(ctx);
@@ -437,7 +449,7 @@ describe('Highlight — site scope', () => {
 });
 
 describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.5.0)', () => {
-  const HIGHLIGHT = { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } };
+  const HIGHLIGHT = { 'data/episode/ep-1/highlight': { markdown: 'The drop' } };
 
   /** Finds the favourite toggle in either state. `aria-pressed` is the only marker it always carries —
    *  its label changes with the state, and since the icons became `--mc-icon-*` masks (core 0.6.15) the
@@ -448,27 +460,29 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
   it('writes this visitor’s mark to data/user/me/… — never to an address naming the user', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'fan' },
-      apiResponses: HIGHLIGHT,
+      user: mockUser('u1', 'fan'),
+      docs: makeMockDocs(HIGHLIGHT),
     });
 
     const container = mount(ctx);
     await flush();
     await clickButton(container, 'Favourite this');
 
-    // `me`, not `u1`: the host resolves the partition from the session and answers 400 to any other id.
-    // The episode is in the key, because a user partition is flat.
-    expect(ctx.api.calls).toContainEqual({ method: 'put', path: 'data/user/me/fav:ep-1', body: true });
-    expect(ctx.api.calls.some((c) => c.path.includes('u1'))).toBe(false);
+    // `me`, not `u1`: `ctx.docs.put('self', …)` resolves to `data/user/me`, which the host resolves from
+    // the session and answers 400 to any other id for. The episode is in the key, because a user
+    // partition is flat. That `'self'` is also the *shortest* call is the whole design — the most
+    // security-relevant convention in the contract is the one that has to be the least work to follow.
+    expect(storedIn(ctx)['data/user/me/fav:ep-1']).toBe(true);
+    expect(Object.keys(storedIn(ctx)).some((path) => path.includes('u1'))).toBe(false);
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('true');
-    expect(ctx.logs).toContainEqual({ level: 'info', message: 'favourite set at data/user/me/fav:ep-1' });
+    expect(ctx.logs).toContainEqual({ level: 'info', message: 'favourite set for ep-1' });
   });
 
   it('reads the existing mark back and withdraws it with a delete', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'fan' },
-      apiResponses: { ...HIGHLIGHT, 'get data/user/me/fav:ep-1': true },
+      user: mockUser('u1', 'fan'),
+      docs: makeMockDocs({ ...HIGHLIGHT, 'data/user/me/fav:ep-1': true }),
     });
 
     const container = mount(ctx);
@@ -477,27 +491,30 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
 
     await clickButton(container, 'Favourited');
 
-    expect(ctx.api.calls).toContainEqual({ method: 'delete', path: 'data/user/me/fav:ep-1' });
+    expect(storedIn(ctx)['data/user/me/fav:ep-1']).toBeUndefined();
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('asks an anonymous visitor to sign in and never requests a partition they do not have', async () => {
-    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: null, apiResponses: HIGHLIGHT });
+    const docs = docsRecording(makeMockDocs(HIGHLIGHT));
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: null, docs });
 
     const container = mount(ctx);
     await flush();
 
     expect(container.textContent).toContain('Sign in to favourite this highlight');
     expect(favButton(container)).toBeUndefined();
-    // An anonymous call to a user path is a 401 — the component must not make it in the first place.
-    expect(ctx.api.calls.some((c) => c.path.startsWith('data/user/'))).toBe(false);
+    // An anonymous call to a user path is a 401 — the component must not make it in the first place, and
+    // the rendered hint above does not prove that. This is the one assertion the in-memory doc double
+    // cannot make on its own, which is why test-utils wraps it in a recorder.
+    expect(docs.reads.some((read) => read.startsWith('self/'))).toBe(false);
   });
 
   it('shows the backend-computed tally, which no browser could have assembled', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'fan' },
-      apiResponses: { ...HIGHLIGHT, 'get data/episode/ep-1/favourites': { count: 7 } },
+      user: mockUser('u1', 'fan'),
+      docs: makeMockDocs({ ...HIGHLIGHT, 'data/episode/ep-1/favourites': { count: 7 } }),
     });
 
     const container = mount(ctx);
@@ -505,22 +522,14 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
 
     // A shared doc written by SamplePlugin's queryAcrossUsers rollup, not a sum of anything this
     // component can see: other visitors' marks are unreachable from here by construction.
-    expect(container.textContent).toContain('7 listener(s) favourited this');
+    expect(container.textContent).toContain('7 listeners favourited this');
   });
 
   it('rolls the optimistic toggle back and logs when the write fails', async () => {
-    const mockApi: MockApiClient = {
-      calls: [],
-      responses: HIGHLIGHT,
-      get: (path: string) => Promise.resolve((HIGHLIGHT as Record<string, unknown>)[`get ${path}`] as never),
-      post: () => Promise.reject(new Error('nope')),
-      put: () => Promise.reject(new Error('network down')),
-      delete: () => Promise.reject(new Error('network down')),
-    };
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'fan' },
-      api: mockApi,
+      user: mockUser('u1', 'fan'),
+      docs: docsFailing(makeMockDocs(HIGHLIGHT), 'put', hostError(500)),
     });
 
     const container = mount(ctx);
@@ -530,12 +539,12 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
     expect(favButton(container)?.getAttribute('aria-pressed')).toBe('false');
     expect(ctx.logs).toContainEqual({
       level: 'warn',
-      message: 'favourite toggle at data/user/me/fav:ep-1 failed: network down',
+      message: 'favourite toggle for ep-1 failed (error.unavailable)',
     });
   });
 
   it('offers nothing to favourite when there is no highlight', async () => {
-    const empty = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: { id: 'u1', role: 'fan' } }));
+    const empty = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: mockUser('u1', 'fan') }));
     await flush();
 
     expect(favButton(empty)).toBeUndefined();
@@ -545,8 +554,8 @@ describe('Highlight — the `user` storage scope (per-visitor favourites, SDK 0.
     const gated = mount(
       makeMockCtx({
         scope: { type: 'episode', id: 'ep-1' },
-        user: { id: 'u1', role: 'fan' },
-        apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The twist', spoiler: true } },
+        user: mockUser('u1', 'fan'),
+        docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The twist', spoiler: true } }),
         progress: { get: () => Promise.resolve(0) },
       }),
     );
@@ -647,7 +656,7 @@ describe('Highlight — ctx.consent (one widget per declared service, driven by 
       scope: { type: 'site', id: 'main' },
       route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'A moment' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -681,7 +690,7 @@ describe('Highlight — ctx.player (key-moment jump/sync)', () => {
     const seekTo = vi.fn();
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 90 } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 90 } }),
       player: { currentTime: () => 0, seekTo, on: () => () => {} },
     });
     const container = mount(ctx);
@@ -700,7 +709,7 @@ describe('Highlight — ctx.player (key-moment jump/sync)', () => {
     let timeUpdateCb: (() => void) | undefined;
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 90 } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 90 } }),
       player: {
         currentTime: () => 120,
         seekTo: () => {},
@@ -727,7 +736,7 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
   it('hides a highlight marked as spoiler until progress shows the visitor has started listening', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The killer is...', spoiler: true } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The killer is...', spoiler: true } }),
       progress: { get: () => Promise.resolve(null) },
     });
     const container = mount(ctx);
@@ -747,7 +756,7 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
   it('shows a spoiler-marked highlight immediately once progress shows listening has started', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The killer is...', spoiler: true } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The killer is...', spoiler: true } }),
       progress: { get: () => Promise.resolve(42) },
     });
     const container = mount(ctx);
@@ -760,7 +769,7 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
   it('never gates a highlight that is not marked as a spoiler, regardless of progress', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Not a spoiler' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Not a spoiler' } }),
       progress: { get: () => Promise.resolve(null) },
     });
     const container = mount(ctx);
@@ -812,10 +821,10 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
   it('renders a single-episode read-only view when ctx.route.path matches a highlight deep link', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
-      user: { id: 'u1', role: 'admin' },
+      user: mockUser('u1', 'admin'),
       route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -829,21 +838,22 @@ describe('Highlight — ctx.route (site-scope deep link + browse index)', () => 
     expect(backLink.getAttribute('href')).toBe('/p/sample/');
   });
 
-  it('percent-encodes the visitor-controlled deep-link slug before it becomes an API path segment', async () => {
-    // `ctx.route.path` comes out of the URL, so an unencoded `..` would be normalized away by the
-    // browser and point the request at a different doc than the one the deep link names.
+  it('cannot express a traversal out of the deep-link route at all', async () => {
+    // `ctx.route.path` comes out of the URL. The version of this test before 2.12.0 asserted that the
+    // plugin percent-encoded a `..` before splicing it into a doc *path* — a defence that had to be
+    // remembered at every call site. `matchRoute` removes the need for it: `highlight/:slug` captures
+    // exactly **one** segment, so a six-segment path matches nothing, there is no deep link, and no
+    // request is built from it. The safe thing stopped being a step someone can forget.
+    const docs = docsRecording(makeMockDocs());
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
       route: { path: 'highlight/../../site/main/settings' },
+      docs,
     });
     mount(ctx);
     await flush();
 
-    expect(ctx.api.calls).toContainEqual({
-      method: 'get',
-      path: 'data/episode/..%2F..%2Fsite%2Fmain%2Fsettings/highlight',
-      body: undefined,
-    });
+    expect(docs.reads.some((read) => read.startsWith('episode:'))).toBe(false);
   });
 
   it('encodes episode slugs in the browse index links', async () => {
@@ -930,7 +940,7 @@ describe('Highlight — ctx.route.navigate (SPA navigation inside /p/sample/, SD
       scope: { type: 'site', id: 'main' },
       route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'Deep-linked moment' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -968,9 +978,9 @@ describe('Highlight — ctx.links (linking to core pages, SDK 0.8.0)', () => {
       scope: { type: 'site', id: 'main' },
       route: { path: 'highlight/ep-1' },
       episodeLabels: { 'ep-1': 'S01E01 · Pilot' },
-      apiResponses: {
-        'get data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 724 },
-      },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': { markdown: 'The drop', momentSeconds: 724 },
+      }),
     });
     const container = mount(ctx);
     await flush();
@@ -985,7 +995,7 @@ describe('Highlight — ctx.links (linking to core pages, SDK 0.8.0)', () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },
       route: { path: 'highlight/ep-1' },
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'A moment' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'A moment' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -998,7 +1008,7 @@ describe('Highlight — ctx.links (linking to core pages, SDK 0.8.0)', () => {
     const ctx = makeMockCtx({
       scope: { type: 'feed', id: 'main' },
       filter: { current: () => ({ season: 2 }), onChange: () => () => {} },
-      apiResponses: { 'get data/feed/main/highlight': { markdown: 'Season two' } },
+      docs: makeMockDocs({ 'data/feed/main/highlight': { markdown: 'Season two' } }),
     });
     const container = mount(ctx);
     await flush();
@@ -1021,9 +1031,9 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
   async function openEditorWith(blobs: MockBlobClient, overrides: Record<string, unknown> = {}) {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: mockUser('u1', 'podcaster'),
       blobs,
-      apiResponses: { 'get data/episode/ep-1/highlight': { markdown: 'The drop' } },
+      docs: makeMockDocs({ 'data/episode/ep-1/highlight': { markdown: 'The drop' } }),
       ...overrides,
     });
     const container = mount(ctx);
@@ -1057,8 +1067,7 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
 
     await clickButton(modal, 'Save');
 
-    const put = ctx.api.calls.find((c) => c.method === 'put')!;
-    const body = put.body as { image?: { ref: string; alt: string } };
+    const body = storedIn(ctx)['data/episode/ep-1/highlight'] as { image?: { ref: string; alt: string } };
     expect(body.image?.ref).toBe(blobs.stored[0].ref);
     // The whole point of storing a ref: no derived URL is persisted anywhere in the document.
     expect(JSON.stringify(body)).not.toContain(blobs.urlFor(blobs.stored[0].ref));
@@ -1070,12 +1079,12 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
       blobs,
-      apiResponses: {
-        'get data/episode/ep-1/highlight': {
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
           markdown: 'The drop',
           image: { ref: stored.ref, alt: 'A waveform' },
         },
-      },
+      }),
     });
     const container = mount(ctx);
     await flush();
@@ -1133,12 +1142,12 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
     const blobs = makeMockBlobs({ mimeTypes: [PNG] });
     const stored = await blobs.upload(file('cover.png', PNG, 128));
     const { modal } = await openEditorWith(blobs, {
-      apiResponses: {
-        'get data/episode/ep-1/highlight': {
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
           markdown: 'The drop',
           image: { ref: stored.ref, alt: 'A waveform' },
         },
-      },
+      }),
     });
 
     // Two-step confirm: the first click arms it, the second is the irreversible one.
@@ -1151,14 +1160,14 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
   it('degrades to text when the operator refused the blobs block (ctx.blobs === null)', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-1' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: mockUser('u1', 'podcaster'),
       blobs: null,
-      apiResponses: {
-        'get data/episode/ep-1/highlight': {
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
           markdown: 'The drop',
           image: { ref: 'blob-1', alt: 'A waveform' },
         },
-      },
+      }),
     });
     const container = mount(ctx);
     await flush();
@@ -1176,9 +1185,9 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
     const blobs = makeMockBlobs({ mimeTypes: [PNG] });
     const ctx = makeMockCtx({
       scope: { type: 'feed', id: 'main' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: mockUser('u1', 'podcaster'),
       blobs,
-      apiResponses: { 'get data/feed/main/highlight': { markdown: 'Season two' } },
+      docs: makeMockDocs({ 'data/feed/main/highlight': { markdown: 'Season two' } }),
     });
     const container = mount(ctx);
     await flush();

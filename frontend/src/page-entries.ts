@@ -55,17 +55,29 @@ export const PAGE_ENTRIES: readonly PageEntry[] = [
 export const DETAIL_PREFIX = 'highlight/';
 
 /**
- * Picks the view for a route subpath.
+ * Every subpath this page renders, in priority order, for {@link matchRoute}.
  *
- * Anything unrecognised falls back to the root view rather than rendering an error: the host reserves the
- * whole `/p/sample/*` subtree, so a stale bookmark or a typo lands here, and an empty page would be a
- * worse answer than the index the visitor was probably looking for.
+ * **The specific pattern comes before the general one**, because the first match wins — that ordering is
+ * the caller's job and the SDK does not sort for you.
+ *
+ * ## Why this replaced a hand-rolled matcher (SDK 0.9.0)
+ *
+ * The version here until 2.11.0 was a `startsWith(DETAIL_PREFIX)` plus a `find` over {@link PAGE_ENTRIES},
+ * which is the shape every page plugin arrives at and the shape that has the bug: `startsWith('moments')`
+ * also matches `moments-archive`, and `'moments'` used to match `moments/3` because nothing checked that
+ * the whole path had been consumed. {@link matchRoute} matches whole paths, captures `:param` segments
+ * already `decodeURIComponent`-ed, and returns **`null`** for the not-found branch.
+ *
+ * ## The `null` branch is a real view now, not a fallback
+ *
+ * Until SDK 0.9.1 an unrecognised subpath here quietly rendered the index, because the host answered
+ * `200` for the whole `/p/sample/*` subtree regardless and an empty page seemed the worse answer. Now the
+ * backend's `PageRouteProvider` answers `false` for exactly these paths and the host sends a real **404**
+ * (ARCHITECTURE §6.6) — so rendering the index under a 404 status line would make the body disagree with
+ * the response. Keep the two in step: **this list and `SamplePlugin.PAGE_SUBPATHS` describe the same set**,
+ * and `page-entries.test.ts` asserts the entrance half against the manifest.
  */
-export function viewFor(path: string): { view: string; slug: string } {
-  if (path.startsWith(DETAIL_PREFIX)) {
-    const slug = path.slice(DETAIL_PREFIX.length);
-    if (slug) return { view: 'detail', slug };
-  }
-  const match = PAGE_ENTRIES.find((entry) => entry.path === path);
-  return { view: match ? match.path || 'index' : 'index', slug: '' };
-}
+export const PAGE_PATTERNS = ['', 'moments', 'gallery', 'unwritten', `${DETAIL_PREFIX}:slug`] as const;
+
+/** One of the subpaths {@link PAGE_PATTERNS} declares. */
+export type PagePattern = (typeof PAGE_PATTERNS)[number];

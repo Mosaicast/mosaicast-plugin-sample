@@ -11,26 +11,41 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.OgMeta;
+import dev.mosaicast.plugin.api.Role;
 import dev.mosaicast.plugin.api.Scope;
+import dev.mosaicast.plugin.api.SearchHit;
+import dev.mosaicast.plugin.api.NotifyMessage;
 import dev.mosaicast.plugin.api.SitemapUrl;
+import dev.mosaicast.plugin.api.TranslationException;
+import dev.mosaicast.plugin.sample.SamplePlugin.AnnouncedLocales;
 import dev.mosaicast.plugin.sample.SamplePlugin.FavouriteCount;
 import dev.mosaicast.plugin.sample.SamplePlugin.Highlight;
 import dev.mosaicast.plugin.sample.SamplePlugin.HighlightIndex;
 import dev.mosaicast.plugin.sample.SamplePlugin.HighlightStats;
+import dev.mosaicast.plugin.sample.SamplePlugin.HighlightTranslation;
 import dev.mosaicast.plugin.sample.SamplePlugin.IndexEntry;
+import dev.mosaicast.plugin.sample.SamplePlugin.TranslationDrafts;
 import dev.mosaicast.plugin.testkit.FakeFeedAccess;
+import dev.mosaicast.plugin.testkit.FakeLocales;
+import dev.mosaicast.plugin.testkit.FakeNotifier;
 import dev.mosaicast.plugin.testkit.FakePluginContext;
+import dev.mosaicast.plugin.testkit.FakeTags;
+import dev.mosaicast.plugin.testkit.FakeTranslation;
+import dev.mosaicast.plugin.testkit.FakeUsers;
 import dev.mosaicast.plugin.testkit.InMemoryDocStore;
 import dev.mosaicast.plugin.testkit.InMemoryPluginBlobs;
 import dev.mosaicast.plugin.testkit.MapPluginConfig;
+import dev.mosaicast.plugin.testkit.PageRouteProviderHarness;
 import dev.mosaicast.plugin.testkit.RecordingLogger.LogEvent;
+import dev.mosaicast.plugin.testkit.SearchProviderHarness;
+import dev.mosaicast.plugin.testkit.SitemapProviderHarness;
+import dev.mosaicast.plugin.testkit.UserDataHandlerHarness;
 import java.io.ByteArrayInputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.event.Level;
 
@@ -38,14 +53,19 @@ import org.slf4j.event.Level;
 class SamplePluginTest {
 
     /**
-     * {@link SamplePlugin} keeps its context in a {@code static} field (see its javadoc for the PF4J
-     * reason), so without this every test would inherit the previous one's context — a test that forgot to
-     * {@code register()} would then pass for the wrong reason.
+     * The instance under test, and there is deliberately only one of it.
+     *
+     * <p>Core installs PF4J's {@code SingletonExtensionFactory} (since 0.6.7), so every extension point —
+     * {@code PluginBackend}, {@code ShareMetadataProvider}, {@code SitemapProvider}, the rest — resolves to
+     * the object {@code register()} ran on. Registering one instance here and calling providers on the same
+     * one is therefore what the host does, and the tests that used to build a second instance were pinning
+     * a workaround for a PF4J default core no longer uses.
+     *
+     * <p>JUnit builds a fresh test-class instance per method, so this field is also what makes a test that
+     * never calls {@code register()} genuinely unregistered — the job the old {@code static} field needed a
+     * {@code @BeforeEach} reset for.
      */
-    @BeforeEach
-    void clearStaticContext() {
-        SamplePlugin.clearContextForTests();
-    }
+    private final SamplePlugin plugin = new SamplePlugin();
 
     private static FakePluginContext contextWithEpisodes(MapPluginConfig config, String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
@@ -60,7 +80,8 @@ class SamplePluginTest {
      */
     private static FakePluginContext contextEnforcingBackendOwnedKeys(String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats", "favourites", "index");
+        InMemoryDocStore store = new InMemoryDocStore()
+                .withBackendOwned("stats", "favourites", "index", "drafts", "announced");
         return new FakePluginContext(store, new MapPluginConfig(), feeds, null);
     }
 
@@ -71,11 +92,11 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-3"), "highlight", new Highlight("another one"));
         // ep-2 deliberately left without a highlight.
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(1, ctx.scheduledCount());
         assertEquals(
-                Optional.of(new HighlightStats(3, 2, 1, 0)),
+                Optional.of(new HighlightStats(3, 2, 1, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
         // Three INFO lines: register() announcing the schedule, plus one per recompute pass — the eager one
         // register() runs itself, and the scheduled one the testkit runs synchronously on registration.
@@ -86,10 +107,10 @@ class SamplePluginTest {
     void countsZeroWhenNoEpisodeHasAHighlight() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2");
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
-                Optional.of(new HighlightStats(2, 0, 0, 0)),
+                Optional.of(new HighlightStats(2, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -109,7 +130,7 @@ class SamplePluginTest {
         ctx.store().asUser(bob).put(Scope.user(), "fav:ep-1", true);
         ctx.store().asUser(bob).put(Scope.user(), "fav:ep-2", true);
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
                 Optional.of(new FavouriteCount(2)),
@@ -118,7 +139,7 @@ class SamplePluginTest {
                 Optional.of(new FavouriteCount(1)),
                 ctx.store().get(Scope.episode("ep-2"), "favourites", FavouriteCount.class));
         assertEquals(
-                Optional.of(new HighlightStats(2, 0, 0, 3)),
+                Optional.of(new HighlightStats(2, 0, 0, 3, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -127,17 +148,17 @@ class SamplePluginTest {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
         UUID alice = UUID.randomUUID();
         ctx.store().asUser(alice).put(Scope.user(), "fav:ep-1", true);
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
         assertTrue(ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class).isPresent());
 
         // The frontend DELETEs its own mark; the next recompute must remove the published count rather
         // than leave a stale one — or write a {"count": 0} the frontend would have to special-case.
         ctx.store().asUser(alice).delete(Scope.user(), "fav:ep-1");
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(Optional.empty(), ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class));
         assertEquals(
-                Optional.of(new HighlightStats(1, 0, 0, 0)),
+                Optional.of(new HighlightStats(1, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -148,11 +169,11 @@ class SamplePluginTest {
         ctx.store().asUser(alice).put(Scope.user(), "fav:ep-1", false); // unfavourited but written, not deleted
         ctx.store().asUser(alice).put(Scope.user(), "fav:ep-gone", true); // episode dropped out of the feed
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(Optional.empty(), ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class));
         assertEquals(
-                Optional.of(new HighlightStats(1, 0, 0, 0)),
+                Optional.of(new HighlightStats(1, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -167,15 +188,15 @@ class SamplePluginTest {
         UUID podcaster = UUID.randomUUID();
         InMemoryDocStore client = ctx.store().asUser(podcaster);
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         // The backend's own write went through — that is the entire point of the declaration.
         HighlightStats computed = ctx.store().get(Scope.site(), "stats", HighlightStats.class).orElseThrow();
-        assertEquals(new HighlightStats(1, 0, 0, 0), computed);
+        assertEquals(new HighlightStats(1, 0, 0, 0, 0, 0), computed);
 
         assertThrows(
                 IllegalStateException.class,
-                () -> client.put(Scope.site(), "stats", new HighlightStats(9999, 9999, 9999, 1337)));
+                () -> client.put(Scope.site(), "stats", new HighlightStats(9999, 9999, 9999, 1337, 0, 0)));
         assertThrows(IllegalStateException.class, () -> client.delete(Scope.site(), "stats"));
         assertThrows(
                 IllegalStateException.class,
@@ -195,10 +216,10 @@ class SamplePluginTest {
         client.put(Scope.episode("ep-1"), "highlight", new Highlight("written by a podcaster"));
         client.put(Scope.user(), "fav:ep-1", true);
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
-                Optional.of(new HighlightStats(1, 1, 0, 1)),
+                Optional.of(new HighlightStats(1, 1, 0, 1, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -209,13 +230,13 @@ class SamplePluginTest {
         // document already sitting in the table from before the plugin declared the key. `backendOwned`
         // refuses *new* client writes; it does not clean up, which is why register() recomputes eagerly
         // instead of leaving the forgery live until the first scheduled pass.
-        ctx.store().put(Scope.site(), "stats", new HighlightStats(9999, 9999, 9999, 1337));
+        ctx.store().put(Scope.site(), "stats", new HighlightStats(9999, 9999, 9999, 1337, 0, 0));
         ctx.store().put(Scope.episode("ep-1"), "favourites", new FavouriteCount(1337));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
-                Optional.of(new HighlightStats(1, 0, 0, 0)),
+                Optional.of(new HighlightStats(1, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
         assertEquals(Optional.empty(), ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class));
         // The repair is only *timely* if register() recomputes itself: the testkit runs onSchedule
@@ -231,10 +252,10 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-1"), "highlight", Map.of("markdown", "   "));
         ctx.store().put(Scope.episode("ep-2"), "highlight", Map.of("momentSeconds", 5));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
-                Optional.of(new HighlightStats(2, 0, 0, 0)),
+                Optional.of(new HighlightStats(2, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
         List<LogEvent> warnings = ctx.logger().events(Level.WARN);
         assertEquals(2, warnings.size());
@@ -254,14 +275,14 @@ class SamplePluginTest {
 
         // The testkit's onSchedule runs the task synchronously on register(), so registering twice is two
         // recompute passes: the first prunes, the second must find nothing left to prune and not warn again.
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
         assertEquals(1, ctx.logger().events(Level.WARN).size());
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(1, ctx.logger().events(Level.WARN).size());
         assertEquals(
-                Optional.of(new HighlightStats(1, 0, 0, 0)),
+                Optional.of(new HighlightStats(1, 0, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -274,17 +295,17 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("   "));
         ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("real content"));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
-        assertEquals(Optional.empty(), new SamplePlugin().metaFor("highlight/ep-1"));
-        assertEquals(List.of(new SitemapUrl("/p/sample/highlight/ep-2", null)), new SamplePlugin().urls());
+        assertEquals(Optional.empty(), plugin.metaFor("highlight/ep-1"));
+        assertEquals(List.of(new SitemapUrl("/p/sample/highlight/ep-2", null)), plugin.urls());
     }
 
     @Test
     void fallsBackToDefaultRefreshIntervalWhenUnconfigured() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         // No "refreshIntervalMinutes" configured; the plugin still schedules (and runs, via the testkit's
         // synchronous onSchedule) using SamplePlugin.DEFAULT_REFRESH_MINUTES.
@@ -301,7 +322,7 @@ class SamplePluginTest {
         // onSchedule throws for a non-positive Duration (ARCHITECTURE §7.8); a naive
         // Duration.ofMinutes(0) here would disable the whole plugin at next startup, so the plugin must
         // clamp to at least one minute instead of passing the configured value through unchanged.
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(1, ctx.scheduledCount());
         List<LogEvent> warnings = ctx.logger().events(Level.WARN);
@@ -309,42 +330,40 @@ class SamplePluginTest {
         assertTrue(warnings.get(0).message().contains("refreshIntervalMinutes"));
     }
 
-    // metaFor()/urls() below always register() on one SamplePlugin instance but call metaFor()/urls() on a
-    // SEPARATE, freshly-constructed one — deliberately, because that's what PF4J actually does in production
-    // (a fresh instance per extension-point type lookup, confirmed by booting a real core: register() ran on
-    // one instance, metaFor()/urls() were invoked on others whose fields were never set, throwing a NPE). A
-    // same-instance test here would pass even with a plain instance field and hide that bug; only a
-    // static/classloader-scoped field (see SamplePlugin.ctx) survives across separate instances, and only a
-    // cross-instance test proves it.
+    // metaFor()/urls() below register and then call providers on the ONE instance, which is what core does:
+    // its PF4J SingletonExtensionFactory caches by class, so every extension-point lookup returns the object
+    // register() ran on. These tests used to build a second instance on purpose, pinning PF4J's *default*
+    // factory (a fresh object per extension-point type — register() on one, metaFor()/urls() on others whose
+    // fields were never set, confirmed as a live NPE against a pre-0.6.7 core). The next test still covers
+    // what survived that fix: a lookup can arrive before register() has run.
 
     @Test
-    void metaForAndUrlsDegradeQuietlyWhenNoInstanceHasRegisteredYet() {
+    void metaForAndUrlsDegradeQuietlyWhenNothingHasRegisteredYet() {
         // Core resolves ShareMetadataProvider/SitemapProvider independently of PluginBackend, so a lookup
         // can land here before register() ever ran. That must produce "nothing to contribute", not the
         // NullPointerException an unguarded `ctx.store()` would throw (which core's per-provider try/catch
         // swallows into a silently wrong page — the exact failure this plugin hit against a real core).
-        assertEquals(Optional.empty(), new SamplePlugin().metaFor("highlight/ep-1"));
-        assertEquals(List.of(), new SamplePlugin().urls());
+        assertEquals(Optional.empty(), plugin.metaFor("highlight/ep-1"));
+        assertEquals(List.of(), plugin.urls());
     }
 
     @Test
     void metaForIsEmptyWhenSubpathIsNotAHighlightPage() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
-        new SamplePlugin().register(ctx);
-        SamplePlugin lookedUpSeparately = new SamplePlugin();
+        plugin.register(ctx);
 
-        assertEquals(Optional.empty(), lookedUpSeparately.metaFor(null));
-        assertEquals(Optional.empty(), lookedUpSeparately.metaFor(""));
-        assertEquals(Optional.empty(), lookedUpSeparately.metaFor("other/ep-1"));
-        assertEquals(Optional.empty(), lookedUpSeparately.metaFor("highlight/"));
+        assertEquals(Optional.empty(), plugin.metaFor(null));
+        assertEquals(Optional.empty(), plugin.metaFor(""));
+        assertEquals(Optional.empty(), plugin.metaFor("other/ep-1"));
+        assertEquals(Optional.empty(), plugin.metaFor("highlight/"));
     }
 
     @Test
     void metaForIsEmptyWhenEpisodeHasNoHighlight() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
-        assertEquals(Optional.empty(), new SamplePlugin().metaFor("highlight/ep-1"));
+        assertEquals(Optional.empty(), plugin.metaFor("highlight/ep-1"));
     }
 
     @Test
@@ -361,9 +380,9 @@ class SamplePluginTest {
                         Scope.episode("ep-1"),
                         "highlight",
                         new Highlight("# Great **moment**\n\nRight at `12:34` the band _finally_ (!) kicks in."));
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
-        Optional<OgMeta> meta = new SamplePlugin().metaFor("highlight/ep-1");
+        Optional<OgMeta> meta = plugin.metaFor("highlight/ep-1");
 
         assertEquals(
                 Optional.of(new OgMeta(
@@ -373,15 +392,114 @@ class SamplePluginTest {
     }
 
     @Test
+    void leavesOgLocaleToTheHostBecauseThisPageFollowsTheShell() {
+        // SDK 0.12.0, and the one assertion that came out of running this against a real core rather than a
+        // harness. OgMeta.locale is for a page fixed in ONE language; this page renders whichever translation
+        // the shell's locale picks, so the host's resolved locale is already right. Naming one here would put
+        // og:locale=en_US and <html lang="en"> on exactly the ?lang=de URL that urls() declares a German
+        // alternate for — one plugin making two contradictory claims about one URL.
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")))
+                .withDisplay("ep-1",
+                        new DisplaySnapshot("Der Leuchtturm", null, null, null, null, null, null, null, null));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                .withLocales(FakeLocales.englishOnly().withUi("de").withDefault("de"));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                new Highlight("Der Leuchtturm", Map.of("en", new HighlightTranslation("The lighthouse"))));
+        plugin.register(ctx);
+
+        assertNull(plugin.metaFor("highlight/ep-1").orElseThrow().locale());
+    }
+
+    @Test
     void urlsListsOnlyEpisodesThatHaveAHighlight() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2", "ep-3");
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("first"));
         ctx.store().put(Scope.episode("ep-3"), "highlight", new Highlight("third"));
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
+        var sitemap = new SitemapProviderHarness("sample", plugin).collect();
+
+        assertTrue(sitemap.problems().isEmpty(), "nothing the host would drop or contradict");
         assertEquals(
-                List.of(new SitemapUrl("/p/sample/highlight/ep-1", null), new SitemapUrl("/p/sample/highlight/ep-3", null)),
-                new SamplePlugin().urls());
+                List.of("/p/sample/highlight/ep-1", "/p/sample/highlight/ep-3"),
+                sitemap.locations());
+    }
+
+    // hreflang alternates (SDK 0.12.0, ARCHITECTURE §6.6/§12.7). Core emits none for a plugin entry unless the
+    // plugin declares them — it cannot read these documents, so it will not guess which languages they exist
+    // in. What follows is the three-way filter that makes the declaration true, one test per way it can lie.
+
+    @Test
+    void declaresATranslationGroupNamingItsOwnLanguageAndEveryLanguageItIsReadableIn() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1")
+                .withLocales(FakeLocales.englishOnly().withUi("de"));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                new Highlight("the lighthouse", Map.of("de", new HighlightTranslation("der Leuchtturm"))));
+        plugin.register(ctx);
+
+        var sitemap = new SitemapProviderHarness("sample", plugin).collect();
+
+        assertTrue(sitemap.problems().isEmpty());
+        assertEquals(List.of("de", "en"), sitemap.locales("/p/sample/highlight/ep-1"));
+        // One path per language: the host appends ?lang=de itself and leaves the default on the bare URL.
+        assertEquals(
+                Map.of("en", "/p/sample/highlight/ep-1", "de", "/p/sample/highlight/ep-1"),
+                sitemap.alternates("/p/sample/highlight/ep-1"));
+    }
+
+    @Test
+    void leavesOutALanguageTheShellCannotRenderEvenThoughItWasAuthoredIn() {
+        // The reason available() and contentLocales() are two lists. An operator can require a Dutch imprint
+        // without offering a Dutch UI, so `nl` is a legitimate content language with no ?lang=nl behind it —
+        // the alternate would resolve to English and contradict its own hreflang. Core applies exactly this
+        // filter to its own legal pages and deliberately does not apply it to a plugin's entries.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1")
+                .withLocales(FakeLocales.englishOnly().withUi("de").withContent("nl"));
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the lighthouse", Map.of(
+                "de", new HighlightTranslation("der Leuchtturm"),
+                "nl", new HighlightTranslation("de vuurtoren"))));
+        plugin.register(ctx);
+
+        var sitemap = new SitemapProviderHarness("sample", plugin).collect();
+
+        assertEquals(List.of("de", "en"), sitemap.locales("/p/sample/highlight/ep-1"));
+    }
+
+    @Test
+    void leavesOutAForgedLocaleKeyAndOneWhoseTabWasNeverFilledIn() {
+        // These keys sit inside a JSON value, so the host's doc-key validation never saw them: they are
+        // client input. Unreachable in the UI, which the frontend can shrug at — and in sitemap.xml, this
+        // plugin telling a crawler a language exists. A blank tab is not a translation either.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1")
+                .withLocales(FakeLocales.englishOnly().withUi("de"));
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the lighthouse", Map.of(
+                "de", new HighlightTranslation("der Leuchtturm"),
+                "zz", new HighlightTranslation("forged"),
+                "fr", new HighlightTranslation("   "))));
+        plugin.register(ctx);
+
+        var sitemap = new SitemapProviderHarness("sample", plugin).collect();
+
+        assertTrue(sitemap.problems().isEmpty());
+        assertEquals(List.of("de", "en"), sitemap.locales("/p/sample/highlight/ep-1"));
+    }
+
+    @Test
+    void makesNoLanguageClaimAtAllForAHighlightNobodyTranslated() {
+        // The empty map is not a degraded answer, it is the pre-0.12.0 behaviour and the honest one: a group
+        // of one says "this page exists, in one language", which is not a translation group. A single-language
+        // site therefore emits exactly what it emitted before this feature existed.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2")
+                .withLocales(FakeLocales.englishOnly().withUi("de"));
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("only ever written once"));
+        ctx.store().put(Scope.episode("ep-2"), "highlight",
+                new Highlight("translated", Map.of("de", new HighlightTranslation("übersetzt"))));
+        plugin.register(ctx);
+
+        var sitemap = new SitemapProviderHarness("sample", plugin).collect();
+
+        assertEquals(List.of(), sitemap.locales("/p/sample/highlight/ep-1"));
+        assertEquals(List.of("de", "en"), sitemap.locales("/p/sample/highlight/ep-2"));
     }
 
     /** A context whose blob store accepts PNGs, for the orphan-sweep tests below. */
@@ -408,7 +526,7 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-1"), "highlight",
                 Map.of("markdown", "still here", "image", Map.of("ref", live, "alt", "a waveform")));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         // The referenced one survives; the one nothing names is collected. Nothing else does this — a blob
         // outlives the document that pointed at it and only this plugin knows which those are.
@@ -424,7 +542,7 @@ class SamplePluginTest {
         ctx.store().put(Scope.site(), "highlight",
                 Map.of("markdown", "site-wide", "image", Map.of("ref", siteImage, "alt", "")));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         // Regression guard for the sweep's own precondition: it walks Scope.site() as well as every
         // episode, so a site-scope image must not read as unreferenced.
@@ -440,7 +558,7 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-1"), "highlight",
                 Map.of("markdown", "text", "image", Map.of("alt", "no ref here")));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         // Reading it as "no reference" is the safe direction only because the blob it fails to protect is
         // one nothing can render anyway; the document itself is untouched.
@@ -457,10 +575,10 @@ class SamplePluginTest {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("no images here"));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertEquals(
-                Optional.of(new HighlightStats(1, 1, 0, 0)),
+                Optional.of(new HighlightStats(1, 1, 0, 0, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
     }
 
@@ -481,7 +599,7 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-3"), "highlight", new Highlight("no moment, no picture"));
         // ep-2 has no highlight, so it must not appear at all.
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
         assertEquals(List.of("ep-1", "ep-3"), index.entries().stream().map(IndexEntry::slug).toList());
@@ -507,7 +625,7 @@ class SamplePluginTest {
         ctx.store().put(Scope.episode("ep-1"), "highlight", Map.of("markdown", "   "));
         ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("a real one"));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
         assertEquals(List.of("ep-2"), index.entries().stream().map(IndexEntry::slug).toList());
@@ -520,7 +638,7 @@ class SamplePluginTest {
         ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
         ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
         assertEquals(2, index.entries().get(0).favourites());
@@ -533,8 +651,703 @@ class SamplePluginTest {
         FakePluginContext ctx = contextEnforcingBackendOwnedKeys("ep-1");
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("something"));
 
-        new SamplePlugin().register(ctx);
+        plugin.register(ctx);
 
         assertTrue(ctx.store().get(Scope.site(), "index", HighlightIndex.class).isPresent());
+    }
+
+    // PageRouteProvider (SDK 0.9.1, ARCHITECTURE §6.6). Every subpath under /p/sample/ used to answer 200,
+    // so a typo and a deleted highlight were indistinguishable from a real page to a crawler. These run
+    // through PageRouteProviderHarness, which probes the root whether a test lists it or not — the failure
+    // it exists to catch is a provider written as a lookup over its own content, which 404s its own landing
+    // page.
+
+    @Test
+    void servesItsOwnEntrancesAndTheHighlightsThatExist() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("written"));
+        // ep-2 deliberately has no highlight: an episode that exists is still not a page here.
+        plugin.register(ctx);
+
+        var routes = new PageRouteProviderHarness(plugin)
+                .check("moments", "gallery", "unwritten", "highlight/ep-1", "highlight/ep-2", "highlight/typo",
+                        "highlight/", "nonsense", "moments/3");
+
+        assertTrue(routes.servesRoot(), "the plugin's own landing page must not 404");
+        assertEquals(List.of("", "moments", "gallery", "unwritten", "highlight/ep-1"), routes.served());
+        assertEquals(
+                List.of("highlight/ep-2", "highlight/typo", "highlight/", "nonsense", "moments/3"),
+                routes.notFound());
+        assertTrue(routes.failures().isEmpty(), "a provider that throws makes the host answer 200 anyway");
+    }
+
+    @Test
+    void doesNotReuseShareMetadataToDecideWhetherARouteExists() {
+        // The tempting shortcut, and the reason PageRouteProvider is a separate interface: metaFor() answers
+        // empty for moments/gallery/unwritten *on purpose* — they have nothing to tell a link scraper — so
+        // reading "no share metadata" as "no page" would 404 three working entrances out of nav[].
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        plugin.register(ctx);
+
+        for (String entrance : List.of("moments", "gallery", "unwritten")) {
+            assertEquals(Optional.empty(), plugin.metaFor(entrance));
+            assertTrue(plugin.hasRoute(entrance), entrance + " must stay a real page");
+        }
+    }
+
+    @Test
+    void keepsAnsweringTwoHundredForItsHighlightsBeforeRegisterHasRun() {
+        // Core resolves extension points independently of register(). Guessing 404 from a plugin that has
+        // not finished starting would hide real pages, and the fixed entrances are answerable regardless.
+
+        assertTrue(plugin.hasRoute(""));
+        assertTrue(plugin.hasRoute("highlight/ep-1"));
+        assertFalse(plugin.hasRoute("nonsense"));
+        assertFalse(plugin.hasRoute(null));
+    }
+
+    // SearchProvider (SDK 0.9.0, ARCHITECTURE §6.7). SearchProviderHarness calls the provider once per role
+    // *including anonymous*, which arrives as a null Role rather than a fourth enum constant — the mistake
+    // an author writes by hand, and the one test this interface's unusual access rule demands.
+
+    private static FakePluginContext contextForSearch() {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken", "the-lighthouse")))
+                .withDisplay("the-kraken",
+                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null))
+                .withDisplay("the-lighthouse",
+                        new DisplaySnapshot("The Lighthouse", "notes", null, null, null, null, null, null, null));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+        ctx.store().put(Scope.episode("the-kraken"), "highlight", new Highlight("the **squid** finally shows up"));
+        return ctx;
+    }
+
+    @Test
+    void contributesHighlightsToTheSiteSearchWithTitlesFromTheFeed() {
+        FakePluginContext ctx = contextForSearch();
+        plugin.register(ctx);
+
+        var results = new SearchProviderHarness(plugin).search("squid");
+
+        // Highlights are `data.readableBy: anonymous`, so this half is the same for everyone — anonymous
+        // included, which is what forRole(null) checks.
+        for (Role role : List.of(Role.ADMIN, Role.PODCASTER, Role.FAN)) {
+            assertEquals(List.of("The Kraken"), results.titles(role));
+        }
+        assertEquals(List.of("The Kraken"), results.titles(null));
+
+        SearchHit hit = results.forRole(null).get(0);
+        // A bare subpath: the host resolves it under /p/<pluginId>/ and drops any attempt to climb out, so a
+        // plugin neither builds that prefix nor could point a result at a core route.
+        assertEquals("highlight/the-kraken", hit.subpath());
+        assertTrue(hit.snippet().contains("squid"));
+        assertFalse(hit.snippet().contains("*"), "the snippet is plain text, like the excerpt behind it");
+        // The title is read live rather than cached into `index`: a display snapshot is overwritten on every
+        // feed refetch (§4.2), so a copy beside the excerpt would be a second, staler answer.
+        assertEquals("The Kraken", hit.title());
+    }
+
+    @Test
+    void offersTheUnwrittenViewToAPodcasterAndNeverToAnonymous() {
+        FakePluginContext ctx = contextForSearch();
+        plugin.register(ctx);
+
+        // "lighthouse" matches an episode with no highlight — nothing for a visitor, a to-do for a podcaster.
+        var results = new SearchProviderHarness(plugin).search("lighthouse");
+
+        assertEquals(List.of("Highlights to write"), results.titles(Role.PODCASTER));
+        assertEquals(List.of("Highlights to write"), results.titles(Role.ADMIN));
+        assertEquals(List.of(), results.titles(Role.FAN));
+        assertEquals(List.of(), results.titles(null));
+        // The regression this interface's access rule exists for: a provider returning something the caller
+        // may not see has leaked it, and nothing else in the contract catches that.
+        assertFalse(results.leakedToAnonymous("unwritten"));
+    }
+
+    @Test
+    void searchDegradesToNothingRatherThanThrowing() {
+        // Runs on a request with a budget (§6.7): a section that fails comes back marked, which reads to a
+        // visitor as "this site does not have it". Cheap, bounded, and never a reason to throw.
+        assertEquals(List.of(), plugin.search("anything", null, 10));
+
+        FakePluginContext ctx = contextForSearch();
+        plugin.register(ctx);
+
+        assertEquals(List.of(), plugin.search("   ", Role.ADMIN, 10));
+        assertEquals(List.of(), plugin.search("squid", Role.ADMIN, 0));
+        assertEquals(List.of(), plugin.search("nothing-matches-this", Role.ADMIN, 10));
+    }
+
+    // UserDataHandler (SDK 0.9.0, ARCHITECTURE §12.8). Core drops the USER-scope marks itself; what it
+    // cannot do is repair the three published documents that counted them.
+
+    @Test
+    void republishesFavouriteCountsWithoutADepartingAccountsMarks() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("worth marking"));
+        UUID leaving = UUID.randomUUID();
+        UUID staying = UUID.randomUUID();
+        ctx.store().asUser(leaving).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().asUser(staying).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().asUser(leaving).put(Scope.user(), "fav:ep-2", true);
+        plugin.register(ctx);
+        assertEquals(Optional.of(new FavouriteCount(2)),
+                ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class));
+
+        // Handlers run BEFORE core drops the account row, so the marks are still there to be filtered out —
+        // which is why this excludes a user rather than simply re-tallying what is left.
+        plugin.eraseUser(leaving.toString());
+
+        assertEquals(Optional.of(new FavouriteCount(1)),
+                ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class),
+                "the remaining visitor's mark must survive");
+        assertEquals(Optional.empty(), ctx.store().get(Scope.episode("ep-2"), "favourites", FavouriteCount.class),
+                "an episode only the departing account marked drops its count entirely");
+        // All three documents that embed the number are repaired, which is why this is one recompute rather
+        // than three patches that could disagree.
+        assertEquals(Optional.of(new HighlightStats(2, 1, 0, 1, 0, 0)),
+                ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+        HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
+        assertEquals(1, index.entries().get(0).favourites());
+    }
+
+    @Test
+    void erasureIsIdempotentBecauseAFailedOneIsRetried() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        UUID leaving = UUID.randomUUID();
+        UUID staying = UUID.randomUUID();
+        ctx.store().asUser(leaving).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().asUser(staying).put(Scope.user(), "fav:ep-1", true);
+        plugin.register(ctx);
+
+        // The harness calls eraseUser twice and fails the test if the second throws. The subtler failure it
+        // does not catch is a handler that *decrements*: that one succeeds twice and is wrong the second
+        // time, so assert the answer too.
+        new UserDataHandlerHarness(plugin).eraseTwice(leaving.toString());
+
+        assertEquals(Optional.of(new FavouriteCount(1)),
+                ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class));
+    }
+
+    @Test
+    void refusesToReportSuccessWhenItCannotErase() {
+        // §12.8: the host writes a row per plugin before it asks and leaves an open record on a failure,
+        // then retries and surfaces it in admin. Swallowing this to report success is how data survives a
+        // deletion nobody notices.
+        assertThrows(IllegalStateException.class, () -> plugin.eraseUser(UUID.randomUUID().toString()));
+    }
+
+    @Test
+    void exportsTheEpisodesAVisitorMarkedWithTitlesCoreCouldNotSupply() {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken")))
+                .withDisplay("the-kraken",
+                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+        UUID visitor = UUID.randomUUID();
+        UUID somebodyElse = UUID.randomUUID();
+        ctx.store().asUser(visitor).put(Scope.user(), "fav:the-kraken", true);
+        ctx.store().asUser(visitor).put(Scope.user(), "fav:ep-gone", true);   // episode left the feed
+        ctx.store().asUser(visitor).put(Scope.user(), "fav:ep-2", false);     // withdrawn, not deleted
+        ctx.store().asUser(somebodyElse).put(Scope.user(), "fav:the-kraken", true);
+        plugin.register(ctx);
+
+        Map<String, Object> export = new UserDataHandlerHarness(plugin)
+                .export(visitor.toString())
+                .orElseThrow();
+
+        // Core can dump `fav:the-kraken → true` on its own; what it cannot do is know that `fav:` is this
+        // plugin's key convention or that the rest of the key is an episode slug. The title is the half
+        // worth overriding the defaulted method for.
+        assertEquals(
+                List.of(Map.of("episode", "the-kraken", "title", "The Kraken"), Map.of("episode", "ep-gone")),
+                export.get("favouritedHighlights"));
+    }
+
+    @Test
+    void exportsNothingForAVisitorWhoMarkedNothing() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        plugin.register(ctx);
+
+        assertEquals(Optional.empty(), plugin.exportUser(UUID.randomUUID().toString()));
+    }
+
+    // Tags (SDK 0.9.0, ARCHITECTURE §6.1.1). FakeTags refuses an episode write unless withEpisodeWrites()
+    // grants it, exactly as the host refuses one without `tags.writesEpisodes` — so a plain FakeTags here is
+    // itself the assertion that this plugin never reaches for a capability its manifest does not declare.
+
+    private static FakePluginContext contextWithTags(FakeTags tags, String... episodeIds) {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withTags(tags);
+    }
+
+    @Test
+    void mirrorsAnEpisodesTagsOntoItsOwnHighlightSubject() {
+        FakeTags tags = new FakeTags().withFeedTag("ep-1", "Maritime").withFeedTag("ep-1", "  maritime ");
+        FakePluginContext ctx = contextWithTags(tags, "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("about a lighthouse"));
+
+        plugin.register(ctx);
+
+        // The host owns the canonical key (trim, collapse whitespace, casefold) and keeps the label from
+        // first use — so the two spellings above are one tag, and the plugin never canonicalises anything.
+        assertEquals(List.of("maritime"), tags.tagsOnSubject("highlight:ep-1"));
+        assertEquals(List.of("highlight:ep-1"), tags.subjectsWith("Maritime"));
+        assertEquals("Maritime", tags.all().get(0).label(), "the label is presentation, kept from first use");
+    }
+
+    @Test
+    void retiresASubjectTagWhenTheFeedDropsItOrTheHighlightGoesAway() {
+        FakeTags tags = new FakeTags().withFeedTag("ep-1", "kraken");
+        FakePluginContext ctx = contextWithTags(tags, "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("about a squid"));
+        plugin.register(ctx);
+        assertEquals(List.of("kraken"), tags.tagsOnSubject("highlight:ep-1"));
+
+        // Removing this plugin's own assignment from its own subject is allowed; §6.1.1 forbids removing
+        // *another writer's*, and nobody else writes here. Contrast untagEpisode, which this plugin cannot
+        // call at all — FakeTags would throw, and so would the host.
+        ctx.store().delete(Scope.episode("ep-1"), "highlight");
+        plugin.register(ctx);
+
+        assertEquals(List.of(), tags.tagsOnSubject("highlight:ep-1"));
+        assertEquals(List.of("ep-1"), tags.episodesWith("kraken"), "the feed's own assignment is untouched");
+    }
+
+    @Test
+    void runsUnchangedOnAnInstallWithNoTagSurface() {
+        // ctx.tags() is null when the manifest declares no `tags` block, or an operator withheld it. Same
+        // posture as ctx.blobs(): the recompute pass must still complete rather than NPE.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("still fine"));
+
+        plugin.register(ctx);
+
+        assertEquals(
+                Optional.of(new HighlightStats(1, 1, 0, 0, 0, 0)),
+                ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Languages and machine translation (SDK 0.10.0/0.11.0)
+    // ---------------------------------------------------------------------------------------------
+
+    /** A bilingual site: content may be authored in English (the default) or German. */
+    private static FakePluginContext bilingual(String... episodeIds) {
+        return contextWithEpisodes(new MapPluginConfig(), episodeIds)
+                .withLocales(FakeLocales.englishOnly().withUi("de"));
+    }
+
+    @Test
+    void countsAHighlightAsFullyTranslatedOnlyWhenEveryContentLanguageIsWritten() {
+        FakePluginContext ctx = bilingual("ep-1", "ep-2");
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+        ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("the keeper"));
+
+        plugin.register(ctx);
+
+        assertEquals(
+                Optional.of(new HighlightStats(2, 2, 0, 0, 1, 0)),
+                ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+    }
+
+    @Test
+    void reportsNothingAsFullyTranslatedOnASingleLanguageSite() {
+        // The empty-list guard, pinned. `containsAll(emptyList)` is true for every episode, so without it
+        // this reads "every highlight is translated into every language" — accurate, and a claim about
+        // something that does not exist. Zero is the honest answer where there is nothing to translate into.
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid"));
+
+        plugin.register(ctx);
+
+        assertEquals(0, ctx.store().get(Scope.site(), "stats", HighlightStats.class).orElseThrow().fullyTranslated());
+    }
+
+    @Test
+    void countsButNeverDeletesTextStoredUnderALocaleTheSiteDoesNotAuthorIn() {
+        // **The keys inside `translations` are client input.** They sit inside a JSON value, so the host's
+        // doc-key pattern never sees them and nothing validated them on the way in — `isContentLocale` is
+        // the check the SDK puts on the backend for exactly this reason.
+        FakePluginContext ctx = bilingual("ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", Map.of(
+                "markdown", "the squid",
+                "translations", Map.of(
+                        "de", Map.of("markdown", "der Tintenfisch"),
+                        "kl", Map.of("markdown", "forged"))));
+
+        plugin.register(ctx);
+
+        HighlightStats stats = ctx.store().get(Scope.site(), "stats", HighlightStats.class).orElseThrow();
+        assertEquals(1, stats.strandedTranslations());
+        // Reported, **not deleted**, and the restraint is the point: this code cannot tell a forged key from
+        // a language an admin disabled after a podcaster legitimately wrote prose in it. Deleting covers the
+        // first and destroys somebody's work in the second — and the first is already harmless, because the
+        // frontend only ever looks up a locale the host handed it.
+        assertTrue(ctx.store().get(Scope.episode("ep-1"), "highlight", Map.class).orElseThrow()
+                .toString().contains("forged"));
+        // Two, not one: `register()` recomputes eagerly and the testkit then fires the schedule
+        // synchronously, so an operator sees the warning once per pass — which is the intent. A stranded
+        // locale is a standing condition, not an event, and it should keep saying so until somebody acts.
+        assertEquals(2, ctx.logger().events(Level.WARN).size());
+    }
+
+    @Test
+    void draftsTheMissingLanguagesIntoADocumentOnlyTheEditorReads() {
+        FakePluginContext ctx = bilingual("ep-1").withTranslation(FakeTranslation.marking());
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid shows up"));
+
+        plugin.register(ctx);
+
+        // Into `drafts`, never into `highlight.translations`. A scheduled job that wrote the second would
+        // publish machine prose to every reader of that language with no human anywhere in the loop.
+        TranslationDrafts drafts =
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.DRAFTS_KEY, TranslationDrafts.class).orElseThrow();
+        assertEquals(1, drafts.drafts().size());
+        assertEquals("de", drafts.drafts().get(0).locale());
+        assertEquals("[de] the squid shows up", drafts.drafts().get(0).markdown());
+        assertEquals("the squid shows up".hashCode(), drafts.drafts().get(0).sourceHash());
+        // Empty, not merely "not the draft": the fixture wrote the doc through the Highlight record, whose
+        // `translations` component serialises as {} — in production the frontend writes this document and the
+        // backend never touches it at all.
+        assertTrue(((Map<?, ?>) ctx.store().get(Scope.episode("ep-1"), "highlight", Map.class).orElseThrow()
+                .getOrDefault("translations", Map.of())).isEmpty());
+    }
+
+    @Test
+    void neverDraftsALanguageThePodcasterHasAlreadyWritten() {
+        FakeTranslation translation = FakeTranslation.marking();
+        FakePluginContext ctx = bilingual("ep-1").withTranslation(translation);
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        // Not one call. Every draft is money on somebody else's metered API, and there is nothing here to do.
+        assertEquals(List.of(), translation.requests());
+    }
+
+    @Test
+    void makesNoCallAtAllWhenTheManifestOrTheOperatorWithheldTranslation() {
+        // `ctx.translation()` is null for two deliberately indistinguishable reasons — no `external.kinds`
+        // declaration, or no provider selected — and the second is every site by default. The pass must
+        // still complete: translation is an enhancement on a recompute that has four other jobs to do.
+        FakePluginContext ctx = bilingual("ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid"));
+
+        plugin.register(ctx);
+
+        assertEquals(Optional.empty(),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.DRAFTS_KEY, TranslationDrafts.class));
+        assertEquals(Optional.of(new HighlightStats(1, 1, 0, 0, 0, 0)),
+                ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+    }
+
+    @Test
+    void skipsDraftingWhenTheProviderIsUnavailableWithoutTouchingIt() {
+        // `available()` is the cheap check that avoids a call nobody expects to succeed. It is advisory, so
+        // the exception path below still has to exist — but a pass that ignored it would spend a request per
+        // episode discovering the same thing.
+        FakeTranslation translation = FakeTranslation.marking().unavailable();
+        FakePluginContext ctx = bilingual("ep-1").withTranslation(translation);
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid"));
+
+        plugin.register(ctx);
+
+        assertEquals(List.of(), translation.requests());
+    }
+
+    @Test
+    void stopsTheWholePassOnARetryableRefusal() {
+        // `retryable()`, not the message: a rate limit does not become untrue for the next episode, and
+        // hammering it is how a soft limit becomes a hard one. Matching on English wording instead is how a
+        // plugin breaks the day the host rewords a log line — which is why `reason()` is an enum.
+        FakeTranslation translation = FakeTranslation.failing(TranslationException.Reason.RATE_LIMITED);
+        FakePluginContext ctx = bilingual("ep-1", "ep-2", "ep-3").withTranslation(translation);
+        for (String id : List.of("ep-1", "ep-2", "ep-3")) {
+            ctx.store().put(Scope.episode(id), "highlight", new Highlight("the squid"));
+        }
+
+        plugin.register(ctx);
+
+        // One call, then the pass gives up — not one per episode. `register()` runs the recompute twice
+        // (eagerly, then the testkit fires the schedule synchronously), so this is one attempt per pass.
+        assertEquals(2, translation.requests().size());
+    }
+
+    @Test
+    void keepsGoingPastANonRetryableRefusal() {
+        // MISCONFIGURED is a fact about one provider setting, not about the site's budget, and the next
+        // locale may well be one the provider does support. Giving up on the whole pass would be the
+        // conservative-looking choice that quietly stops drafting anything at all.
+        FakeTranslation translation = FakeTranslation.failing(TranslationException.Reason.MISCONFIGURED);
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1")
+                .withLocales(FakeLocales.englishOnly().withUi("de", "nl"))
+                .withTranslation(translation);
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid"));
+
+        plugin.register(ctx);
+
+        // Both languages attempted, and nothing written.
+        assertEquals(List.of("de", "nl"), translation.requests().stream().map(r -> r.to()).distinct().toList());
+        assertEquals(Optional.empty(),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.DRAFTS_KEY, TranslationDrafts.class));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Who wrote it (SDK 0.13.0, ctx.users, ARCHITECTURE §8.8)
+    // ---------------------------------------------------------------------------------------------
+
+    /** One episode with a feed snapshot, which {@code metaFor} needs for its title and artwork. */
+    private static FakePluginContext contextWithDisplay(String episodeId) {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeId)))
+                .withDisplay(episodeId,
+                        new DisplaySnapshot("The Kraken", null, null, null, null, null, null, null, null));
+        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+    }
+
+    @Test
+    void putsTheAuthorsCurrentNameInTheOpenGraphDescriptionRatherThanAStoredCopy() {
+        FakeUsers users = new FakeUsers();
+        UUID ana = users.withUser("Ana Ruiz", Role.PODCASTER);
+        FakePluginContext ctx = contextWithDisplay("ep-1").withUsers(users);
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid shows up", ana.toString()));
+
+        plugin.register(ctx);
+
+        OgMeta meta = plugin.metaFor("highlight/ep-1").orElseThrow();
+        assertTrue(meta.description().endsWith("— Ana Ruiz"), meta.description());
+        // The name was never stored. What is in the document is the UUID, which is why a rename shows up on
+        // the next scrape rather than the next time somebody edits the highlight.
+        assertEquals(List.of(ana), users.resolvedIds());
+    }
+
+    @Test
+    void leavesTheHighlightStandingWhenItsAuthorHasBeenErased() {
+        // `resolve` **omits** an unknown, erased or pseudonymised id rather than returning a tombstone for
+        // it (§12.8), so the result is not index-aligned with what was asked and may be shorter. The
+        // highlight outlives its author: description without a byline, no exception, no empty dash.
+        FakeUsers users = new FakeUsers();
+        UUID ana = users.withUser("Ana Ruiz", Role.PODCASTER);
+        users.withoutUser(ana);
+        FakePluginContext ctx = contextWithDisplay("ep-1").withUsers(users);
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid shows up", ana.toString()));
+
+        plugin.register(ctx);
+
+        assertEquals("the squid shows up", plugin.metaFor("highlight/ep-1").orElseThrow().description());
+    }
+
+    @Test
+    void carriesTheAuthorIdIntoTheListingSoThePageCanResolveItInOneCall() {
+        FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1", "ep-2");
+        UUID ana = UUID.randomUUID();
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid", ana.toString()));
+        // ep-2's highlight predates 2.15.0 and has no authorId at all — the ordinary case for a while.
+        ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("the keeper"));
+
+        plugin.register(ctx);
+
+        List<IndexEntry> entries = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow().entries();
+        assertEquals(ana.toString(), entries.stream().filter(e -> e.slug().equals("ep-1")).findFirst()
+                .orElseThrow().authorId());
+        assertNull(entries.stream().filter(e -> e.slug().equals("ep-2")).findFirst().orElseThrow().authorId());
+    }
+
+    @Test
+    void ignoresAnAuthorIdThatIsNotAUuidRatherThanFailingThePage() {
+        // `authorId` lives in a shared-scope document, which has no owner: anything above `data.writableBy`
+        // could PUT any string here. It is a byline and nothing is decided on it, so a malformed one costs
+        // a reader a byline and nothing else.
+        FakeUsers users = new FakeUsers();
+        FakePluginContext ctx = contextWithDisplay("ep-1").withUsers(users);
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the squid", "not-a-uuid"));
+
+        plugin.register(ctx);
+
+        assertEquals("the squid", plugin.metaFor("highlight/ep-1").orElseThrow().description());
+        assertEquals(List.of(), users.resolvedIds());
+    }
+
+    @Test
+    void asksNobodyWhenTheManifestDeclaresNoIdentityBlock() {
+        // `ctx.users()` is null without an `identity` block, the same shape `blobs`, `tags` and
+        // `translation` have. A fork of this plugin that drops the block keeps working, minus the byline.
+        FakePluginContext ctx = contextWithDisplay("ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                new Highlight("the squid", UUID.randomUUID().toString()));
+
+        plugin.register(ctx);
+
+        assertEquals("the squid", plugin.metaFor("highlight/ep-1").orElseThrow().description());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Telling a listener their highlight speaks their language (SDK 0.14.0, ctx.notifier, §17)
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * A bilingual site with a notifier, and one user who favourited {@code ep-1}.
+     *
+     * <p>{@link FakeNotifier} reads eligibility from the {@link InMemoryDocStore}'s own user partitions, so
+     * the act that makes somebody notifiable is the act that made them a favouriter — the rule cannot drift
+     * from the host's, which checks the same partitions.
+     */
+    private static FakePluginContext announcing(FakeNotifier[] out, UUID favouriter, String... episodeIds) {
+        FakePluginContext ctx = bilingual(episodeIds);
+        ctx.store().asUser(favouriter).put(Scope.user(), "fav:" + episodeIds[0], true);
+        FakeNotifier notifier = new FakeNotifier(ctx.store());
+        out[0] = notifier;
+        return ctx.withNotifier(notifier);
+    }
+
+    @Test
+    void seedsWhatAnEpisodeAlreadyHasInsteadOfAnnouncingAllOfItAtOnce() {
+        // The migration case, and the one worth a test of its own: treating an absent record as "nothing
+        // announced yet" would fire one notification per existing translation at every existing favouriter
+        // the moment this version is installed.
+        FakeNotifier[] out = new FakeNotifier[1];
+        FakePluginContext ctx = announcing(out, UUID.randomUUID(), "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        assertEquals(List.of(), out[0].delivered());
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    @Test
+    void tellsEveryFavouriterWhenAHighlightGainsALanguage() {
+        FakeNotifier[] out = new FakeNotifier[1];
+        UUID ana = UUID.randomUUID();
+        FakePluginContext ctx = announcing(out, ana, "ep-1");
+        // Already seeded with nothing: the episode has been seen before and had no translations then.
+        ctx.store().put(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of()));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        List<NotifyMessage> got = out[0].messagesFor(ana);
+        assertEquals(1, got.size(), "one announcement, not one per recompute pass");
+        // Every language up front, because the reader's is not knowable here — there is no read side, and a
+        // notification written on a timer is read days later in whatever language the shell is set to then.
+        // And the *new language* is named in the language of the sentence it sits in: "German" to an English
+        // reader, "Deutsch" to a German one. Naming every language by its endonym produced "now available in
+        // Deutsch" in the English text, which is a bug a unit test can catch and a live run found first.
+        assertTrue(got.get(0).textFor("en").contains("German"), got.get(0).textFor("en"));
+        assertFalse(got.get(0).textFor("en").contains("Deutsch"), got.get(0).textFor("en"));
+        assertTrue(got.get(0).textFor("de").startsWith("Das Highlight"), got.get(0).textFor("de"));
+        assertTrue(got.get(0).textFor("de").contains("Deutsch"), got.get(0).textFor("de"));
+        // The link is a subpath of this plugin's own subtree — one of the two shapes the host will point a
+        // notification at. Anything off-site is refused, and rightly.
+        assertEquals("highlight/ep-1", got.get(0).link());
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    @Test
+    void countsWhoWasActuallyReachedRatherThanWhoWasAskedFor() {
+        // `send` answers the ids it notified, not `void`, because the host's eligibility rule guarantees
+        // partial sends: a favouriter erased since the mark was written is the ordinary case. One stale
+        // participant must not cost the others their notification, and the difference must not be silent.
+        FakeNotifier[] out = new FakeNotifier[1];
+        UUID ana = UUID.randomUUID();
+        FakePluginContext ctx = announcing(out, ana, "ep-1");
+        // A second favouriter whose account is gone: a mark in the tally, no partition left to deliver to.
+        UUID ghost = UUID.randomUUID();
+        ctx.store().asUser(ghost).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().asUser(ghost).delete(Scope.user(), "fav:ep-1");
+        ctx.store().put(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of()));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        assertEquals(List.of(ana), out[0].delivered().stream().map(FakeNotifier.Delivery::userId).toList());
+        // Recorded anyway: the announcement happened, and re-running it would not resurrect the ghost.
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    @Test
+    void holdsTheAnnouncementForALaterTickWhenTheOperatorsCapIsExhausted() {
+        // RATE_LIMITED is retryable(), so the record is **not** advanced — the next tick tries the same
+        // episode again. Advancing it would drop an announcement on the floor because the site was busy.
+        // A cap of one and two episodes is the real shape: the first send spends it and the second is
+        // refused, which is exactly what a backlog draining against an operator's limit looks like.
+        FakeNotifier[] out = new FakeNotifier[1];
+        UUID ana = UUID.randomUUID();
+        FakePluginContext ctx = announcing(out, ana, "ep-1", "ep-2");
+        ctx.store().asUser(ana).put(Scope.user(), "fav:ep-2", true);
+        out[0].withPerUserPerDay(1);
+        for (String id : List.of("ep-1", "ep-2")) {
+            ctx.store().put(Scope.episode(id), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of()));
+            ctx.store().put(Scope.episode(id), "highlight",
+                    Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+        }
+
+        plugin.register(ctx);
+
+        // One delivery, for the episode that got in under the cap.
+        assertEquals(1, out[0].delivered().size());
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+        // The refused one keeps its place: still nothing announced, so a later tick will try again.
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of())),
+                ctx.store().get(Scope.episode("ep-2"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+        assertTrue(ctx.logger().events(Level.WARN).stream()
+                .anyMatch(e -> e.message().contains("RATE_LIMITED")), ctx.logger().events(Level.WARN).toString());
+    }
+
+    @Test
+    void neverAnnouncesTheSameLanguageTwice() {
+        FakeNotifier[] out = new FakeNotifier[1];
+        UUID ana = UUID.randomUUID();
+        FakePluginContext ctx = announcing(out, ana, "ep-1");
+        ctx.store().put(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of("de")));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        assertEquals(List.of(), out[0].delivered());
+    }
+
+    @Test
+    void tellsNobodyAboutAHighlightNobodyFavourited() {
+        // Eligibility is the host's and is satisfied by construction here — a favouriter has a USER-scope
+        // row, which is the same partition the host checks. With no favouriters there is nobody this plugin
+        // is permitted to reach, and it does not try.
+        FakePluginContext ctx = bilingual("ep-1");
+        FakeNotifier notifier = new FakeNotifier(ctx.store());
+        ctx = ctx.withNotifier(notifier);
+        ctx.store().put(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of()));
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        assertEquals(List.of(), notifier.delivered());
+        // The record still advances: the language is not news any more once the pass has seen it, and
+        // leaving it out would announce it to whoever favourites the highlight tomorrow.
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    @Test
+    void writesNoBookkeepingAtAllWhenTheManifestDeclaresNoNotificationsBlock() {
+        // `ctx.notifier()` is null without the block. Nothing is stored either — a plugin that cannot
+        // announce has nothing to remember about announcements.
+        FakePluginContext ctx = bilingual("ep-1");
+        ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+
+        plugin.register(ctx);
+
+        assertEquals(Optional.empty(),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
     }
 }

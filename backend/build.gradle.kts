@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "dev.mosaicast.plugin"
-version = "2.11.0"
+version = "2.15.0"
 
 java {
     toolchain {
@@ -31,13 +31,13 @@ repositories {
 }
 
 dependencies {
-    compileOnly("dev.mosaicast:plugin-api:0.8.0")
-    compileOnly("org.pf4j:pf4j:3.15.0")
-    annotationProcessor("org.pf4j:pf4j:3.15.0") // generates the PF4J extension index for @Extension
+    compileOnly("dev.mosaicast:plugin-api:0.14.0")
+    compileOnly("org.pf4j:pf4j:3.15.1")
+    annotationProcessor("org.pf4j:pf4j:3.15.1") // generates the PF4J extension index for @Extension
 
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("dev.mosaicast:plugin-testkit:0.8.0")
+    testImplementation("dev.mosaicast:plugin-testkit:0.14.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
