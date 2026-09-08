@@ -19,3 +19,7 @@ dist/
 
 # Browser-automation scratch output (Playwright MCP snapshots/console logs)
 .playwright-mcp/
+
+# Claude Code: shared settings are committed, personal ones are not
+# (`*.local` above does not match `settings.local.json`)
+.claude/settings.local.json
