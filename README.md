@@ -101,6 +101,49 @@ is a second Web Component with its own `ctx` — see "Two ways to be configurabl
 The **episode/card** slot (`sample-highlight-card`, `components/HighlightCard.tsx`) is a third — see
 "The `card` placement" below.
 
+## A component that survives a reassigned `ctx` (SDK 0.15.0)
+`sample-element.tsx` is the most copy-pasted file in this repo, so what its `render` returns matters more
+than its length suggests. Until 0.15.0 the only option was a cleanup callback:
+
+```tsx
+render: ({ ctx, root }) => {
+  const reactRoot = createRoot(root);
+  reactRoot.render(<Highlight ctx={ctx} />);
+  return () => reactRoot.unmount();      // ← "destroy me on every ctx assignment"
+}
+```
+
+That is what the contract says a bare callback means: reassigning `ctx` runs your cleanup, clears `root`
+and renders again. Which reads as a rare event — a language switch, a consent choice — until you count. A
+host that rebuilds its context object on each of its own renders reassigns it **several times a second**
+during playback, and every plugin element on the page is destroyed and rebuilt at that rate: component
+state, scroll position, open dialogs and in-flight requests gone each time, every effect behind them
+re-run. One measured core feed page fetched the same document eight times, and the module-level cache a
+plugin had written to compensate turned that into 19 requests.
+
+All four elements here now return a **`MosaicastHandle`** instead, factored into one `reactElement` helper:
+
+```tsx
+return { update: (next) => reactRoot.render(node(next)), destroy: () => reactRoot.unmount() };
+```
+
+With an `update`, a new `ctx` is a React re-render of the *same* root — the SDK refreshes the `--mc-*`
+theme variables, calls `update(next)` and leaves `root` alone — so React reconciles and the DOM survives.
+`destroy` then answers only to a real disconnect. Two things you no longer have to build: an **identical**
+context object is ignored either way, and an element **moved** in the DOM renders again rather than staying
+dead.
+
+> **Be honest about why you are doing this.** Core **0.7.2** fixed the 4×/s churn on its own side
+> (`PluginMount` no longer lists the player's context value as a dependency), so against a current host
+> this is not a live performance bug. Adopt the handle because it is the contract's shape and it is correct
+> for the assignments a host legitimately still makes — not as a workaround for a symptom that is already
+> gone. If you wrote a module-level cache to survive the old remount storm, this is the release to delete
+> it — measure first. `sample-element.test.tsx` pins the behaviour: an open edit modal with half-typed text
+> in it must still be there after a new `ctx` arrives.
+
+Returning a bare cleanup callback still means exactly what it always did, so a static card needs no change
+at all.
+
 ## The `card` placement — a second, deliberately smaller element
 `card` is the compact region on an episode's **feed card**, and it is the one placement with a design rule
 attached (ARCHITECTURE §7.3): a plugin puts a badge there and keeps full rendering for the detail page's
@@ -279,17 +322,17 @@ modal inside an already-portalled modal is more machinery than one destructive c
 | Member | What this plugin does with it |
 |---|---|
 | `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
-| `blobs()` | New in 0.8.0 — the scheduled recompute also **sweeps orphaned images**: it collects every `image.ref` the highlight docs still name, pages `blobs().list(…)`, and deletes the rest. Nothing on this platform collects orphans, and a blob outlives the document that named it, so without this every swapped picture leaks a file. The frontend deletes the ref it just stopped pointing at; this is the net under it, for the tab closed mid-edit and the `remove` that failed. See [below](#the-sweep-can-only-collect-what-the-backend-can-enumerate) for the constraint that shapes it. |
+| `blobs()` | New in 0.8.0 — the scheduled recompute also **sweeps orphaned images**: it collects every `image.ref` the highlight docs still name, pages `blobs().list(…)`, and deletes the rest. Nothing on this platform collects orphans, and a blob outlives the document that named it, so without this every swapped picture leaks a file. The frontend deletes the ref it just stopped pointing at; this is the net under it, for the tab closed mid-edit and the `remove` that failed. Since 2.16.0 an admin can put it in report-only mode with the `imageSweep` config field. See [below](#the-sweep-can-only-collect-what-the-backend-can-enumerate) for the constraint that shapes it. |
 | `locales()` | New in 0.10.0 — the recompute pass reads `contentLocales()`/`defaultLocale()` once per pass (a registry an admin edits, so re-reading it mid-walk would let a setting change halfway through), and runs **`isContentLocale(code)` on every `translations` key it reads**. Those keys are client input: they sit inside a JSON value, so the host's doc-key pattern never sees them. A key that fails is **counted and left alone** — see [below](#two-locale-lists-and-picking-the-wrong-one-is-silent-sdk-0100) for why deleting would be the wrong call. |
 | `translation()` | New in 0.10.0 — the same pass **drafts** the languages nobody has written yet into a separate `backendOwned` `drafts` document the edit modal offers and a reader never sees. `null` on the manifest alone here: `usedBy` is browser-only, because a backend runs on a timer with no visitor and no role. `TranslationException` is **checked**, and `retryable()` decides whether the pass stops or moves to the next language. Capped at five calls a pass — this runs unattended, on somebody else's metered API. See [below](#machine-translation-is-a-draft-and-says-so-twice-sdk-0110). |
 | `users()` | New in 0.13.0 — `metaFor` resolves the highlight's stored `authorId` to a display name for the OpenGraph description, per request and **never stored**. `null` unless the manifest declares `identity`. `resolve` omits an id it cannot answer for rather than returning a tombstone, so the byline simply disappears when its author does. |
 | `notifier()` | New in 0.14.0 — the scheduled pass tells everyone who favourited a highlight when it gains a language they can now read it in. `null` unless the manifest declares `notifications`. `NotificationException` is **checked**, and `retryable()` decides whether the announcement is held for a later tick or written off. It is `notifier()` and not `notify()` because `Object.notify()` is `final` in Java. See [below](#the-one-surface-that-writes-into-somebody-elses-site-sdk-0140). |
 | `schema()` | Not used — the manifest is the one place a plugin says which store it uses, and this one declares `"storage": "doc"`, so `schema()` is `null` by contract. It is `null` for every plugin that does not declare `storage.schema`; the doc store is the default and covers nearly everything, which is why the reference plugin uses it. Exercising `SchemaStore`/`Criteria` would mean changing what this plugin stores, not adding a call. Same story on the frontend — see `ctx.schema` above. |
-| `config()` | `refreshIntervalMinutes` — read and passed to `onSchedule`. Genuinely admin/podcaster-editable today via core's generic config-admin form (`PUT /api/admin/plugins/sample/config`) — see "Two ways to be configurable" below. |
+| `config()` | Two fields, one per `editableBy` level. `refreshIntervalMinutes` (podcaster) is re-read **before every tick** since 2.16.0 rather than captured at `register()`; `imageSweep` (admin) decides whether the orphan sweep deletes or only reports. Both carry a localized `label`/`description`, and `imageSweep` a closed `options` set, so core's generic config-admin form shows an operator something other than the identifier — see "Two ways to be configurable" below. |
 | `feeds()` | `episodesIn(Scope.site())` for the stats aggregate and the sitemap; `display(refId)` for the deep link's OG title/artwork. |
-| `onSchedule` | Recomputes the highlighted-episode count (and how many have a key moment), prunes contentless docs, and rolls up per-visitor favourites, every `refreshIntervalMinutes`. |
+| `onSchedule` | Recomputes the highlighted-episode count (and how many have a key moment), prunes contentless docs, and rolls up per-visitor favourites, every `refreshIntervalMinutes`. Registered with the **`Supplier<Duration>`** overload (SDK 0.15.0), not a `Duration`: the period comes from a podcaster-editable config field, and the value-taking form captures it during `register()` — so the save succeeded, read back correctly, and changed nothing until a restart. |
 | `tags()` | New in 0.9.0 — the recompute pass **reconciles** each episode's tags onto this plugin's own subject (`highlight:<slug>`), adding what the feed carries and removing what it has dropped. `null` when the manifest declares no `tags` block, so the pass is guarded exactly as the blob sweep is. It never calls `tagEpisode`, which would need a second declaration this plugin does not ask for. |
-| `logger()` | New in 0.4.0 — an SLF4J `Logger` named `plugin.sample` by the host. `WARN` on a non-positive `refreshIntervalMinutes` (clamped, not trusted) and on a stored highlight doc with a missing/blank `markdown` field (skipped, not crashed on); `INFO` on registration and on every recompute, with the counts. |
+| `logger()` | New in 0.4.0 — an SLF4J `Logger` named `plugin.sample` by the host. `WARN` on a non-positive `refreshIntervalMinutes` (clamped, not trusted), on an unrecognised `imageSweep`, and on a stored highlight doc with a missing/blank `markdown` field (skipped, not crashed on); `INFO` on registration and on every recompute, with the counts. The interval lines are logged **per transition, not per tick** — the period supplier now runs before every fire, so an unconditional line would bury the log at exactly the cadence an operator is trying to tune. |
 
 `SamplePlugin` also implements **all five optional** backend extension points a plugin may add alongside
 `PluginBackend` (ARCHITECTURE §7.4), the same single-class pattern the wiki plugin is documented to use.
@@ -969,26 +1012,56 @@ Three things this plugin had to get right, and one it deliberately didn't do:
 running host.
 
 ## Two ways to be configurable — and why this plugin uses both
-The manifest declares `refreshIntervalMinutes` (`type: "number", editableBy: "podcaster"`) in its `config`
-block, and **core's generic config-admin form is now real** (merged via `feat/plugin-config-activation` +
-`feat/plugin-admin-ui`): **Admin → Plugins** renders one input per declared field — a checkbox for
-`boolean`, a number input for `number`, a text input for anything else (`string`) — persists an override to
-a dedicated table (`plugin_config`), and `ctx.config().get(...)` resolves **admin override → manifest
-default → empty** on every call, no restart needed. A `podcaster` can edit fields whose `editableBy` says
-so (enforced with a 403 otherwise); only `admin` can toggle activation or purge a plugin's data. Confirmed
-live: `PUT /api/admin/plugins/sample/config {"refreshIntervalMinutes": 5}` persists and reads back
-immediately. **The manifest's `config` only supports `string`/`number`/`boolean`** (an unrecognized `type`
-fails manifest validation at load) — there is no `select`/enum widget.
+The manifest declares two `config` fields, and **core's generic config-admin form is real**: **Admin →
+Plugins** renders one input per declared field, persists an override to a dedicated table
+(`plugin_config`), and `ctx.config().get(...)` resolves **admin override → manifest default → empty** on
+every call, no restart needed. A `podcaster` can edit fields whose `editableBy` says so (enforced with a
+403 otherwise); only `admin` can toggle activation or purge a plugin's data. **The manifest's `config` only
+supports `string`/`number`/`boolean`** — an unrecognized `type` fails manifest validation at load.
 
-That last point is exactly why this plugin *also* ships a second, hand-built pattern: its own admin slot
-(`site`/`sidebar`, `visibleTo: "podcaster"`) writing a small doc to its own store
+The two fields are deliberately one per role, so this repo demonstrates both halves of that form:
+
+| Field | `editableBy` | Why |
+|---|---|---|
+| `refreshIntervalMinutes` | `podcaster` | How often the backend recomputes. Tuning your own site's refresh rate is configuring a feature. |
+| `imageSweep` | `admin` | Whether the orphan sweep **deletes** files or only reports them. Deleting stored files is *acting on* storage, not configuring a feature. |
+
+Core 0.7.2 fixed the half that made `editableBy: "podcaster"` decorative: writing a field was already open
+per-role, but the `GET` the form renders from fell through to the ADMIN catch-all, so a podcaster could
+write a field they were never allowed to read and saw "Not allowed" on the whole page. They now see the
+whole list with admin-only rows **shown and disabled** — not hidden, because saving is all-or-nothing and
+typing into a row the server will refuse would cost them the edits they *were* allowed to make.
+
+### A field can say what it is, and what values it takes (core 0.7.2, SDK 0.15.0 types)
+Plugins may not build their own config UI, so the generated form is the only thing an operator ever sees —
+and without a `label` it shows them `refreshIntervalMinutes (podcaster)` and nothing else: no unit, no
+meaning, no hint what a sane value is. Both fields here carry a **`label`** and a **`description`**, each
+either a plain string or an object keyed by locale (`{ "en": …, "de": … }`), resolved in the browser
+against the language the operator is reading in. The key stays visible beside the label, because a
+plugin's own documentation names the identifier. The host validates the **shape** and never the content.
+
+`imageSweep` additionally declares **`options`**, the closed set of values it accepts — core renders a
+select instead of a text box and refuses anything outside the set, at load for the manifest's own
+`default` and at write time for an operator's override. **This is the field where that matters most.**
+Without it, `imageSweep` is a free-text box in front of a job that *deletes files*: a typo (`"reprot"`)
+validates, stores, reads back as saved, and the plugin's fallback silently resumes deleting. A closed set
+costs one array and removes that entirely. Note that `options` is **not new host behaviour** — core has
+enforced it since it shipped there; only the SDK's TS type was behind, and 0.15.0 caught it up.
+
+The backend still refuses to trust the value it reads: `options` cannot un-store something written *before*
+the field declared one, so an unrecognised `imageSweep` falls back to **report-only** with a `WARN`. That
+is the safe branch, not the default one — refusing to delete on a value you do not understand costs
+storage, and the other way costs files.
+
+### And why a hand-built admin slot still exists
+`options` covers a closed set of strings, not everything. So this plugin *also* ships a second pattern: its
+own admin slot (`site`/`sidebar`, `visibleTo: "podcaster"`) writing a small doc to its own store
 (`data/site/main/settings`), which every `Highlight` instance reads back and applies — a heading override
-(a `string`, which the generic form could do too) and a **font choice presented as a real `<select>`**
-(which the generic form cannot — it would only ever offer a free-text box for that field). Reach for a
-declared `config` field first; reach for your own admin slot when you need a richer widget, cross-field
-validation, or anything beyond the three primitive types. **Try it:** open the site page as a podcaster,
-change the heading or font in the sidebar panel, save, and reload any episode/feed/site page — the change
-is immediate and visible to anonymous visitors too.
+and a font choice, with a live preview beside them. Reach for a declared `config` field first (it is free,
+role-aware and localized); reach for your own admin slot when you need a preview, cross-field validation,
+or a widget the three primitive types plus `options` cannot express. **Try it:** open the site page as a
+podcaster, change the heading or font in the sidebar panel, save, and reload any episode/feed/site page —
+the change is immediate and visible to anonymous visitors too.
 
 ## Consent (ARCHITECTURE §12.5, SDK 0.4.0 service-level model)
 `plugin.json` declares four **services** under `consent.services[]` (not the pre-0.4.0
@@ -1094,6 +1167,12 @@ live image out from under a podcaster.
 > mode is silent, delayed, and destroys someone's upload. It is also why `rememberImageRef` reads the ref
 > defensively off the raw `JsonNode` — a shape it fails to understand must read as "no reference", which
 > costs a leaked file, rather than as "unreferenced", which costs a live one.
+
+Since 2.16.0 an admin can also stand the sweep down entirely: `imageSweep: "report"` names the orphans in
+the log and deletes nothing. That is the dry run to take before letting anything delete files on a real
+install for the first time — and, because nothing else on this platform collects orphans, a mode to switch
+back off once the list looks right. The same field is where this repo demonstrates a closed `options` set;
+see ["A field can say what it is"](#a-field-can-say-what-it-is-and-what-values-it-takes-core-072-sdk-0150-types).
 
 ## `links` vs `navigate` — two different questions
 0.8.0's `ctx.links` and 0.7.0's `ctx.route.navigate` look adjacent and are not interchangeable:
@@ -1304,6 +1383,39 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.16.0** — SDK **0.15.0**, hosted by core **0.7.2**. One contract minor, and unusually it is a release
+  that fixes bugs this plugin *had* rather than adding a surface it lacked.
+  - **[A schedule that follows its config](#two-ways-to-be-configurable--and-why-this-plugin-uses-both)** —
+    `onSchedule` now takes a **`Supplier<Duration>`**, and the host re-reads it before every tick.
+    `refreshIntervalMinutes` is `editableBy: "podcaster"`, and the `Duration` overload captured it during
+    `register()` and held it for the life of the process: the form said "saved", the value read back
+    correctly, and the plugin went on recomputing at the old cadence until someone restarted core. Nothing
+    on either screen said so. An edit now lands within one old period. The clamp moved into the supplier
+    (only the value at *registration* is strict) and the interval logging became **per transition, not per
+    tick** — the supplier runs before every fire, so an unconditional line would bury the log at exactly
+    the cadence an operator is trying to tune. `SamplePluginTest` asserts it through
+    `FakePluginContext.scheduledPeriods()`, which re-reads every supplier on demand: a plugin that captured
+    a `Duration` keeps reporting the old period and fails.
+  - **[A component that survives a reassigned `ctx`](#a-component-that-survives-a-reassigned-ctx-sdk-0150)** —
+    all four elements return a **`MosaicastHandle`** (`{ update, destroy }`) instead of a bare cleanup
+    callback, so a new `ctx` re-renders the same React root rather than unmounting the tree, and `destroy`
+    answers only to a real disconnect. Stated plainly in the README: core **0.7.2** already fixed the 4×/s
+    churn that motivated the contract change, so this is adopted because it is the contract's shape, not
+    because a current host still misbehaves. The test that pins it opens the edit modal, types into it,
+    hands the element a new `ctx`, and requires the half-written note to still be there.
+  - **[Config fields that say what they are](#a-field-can-say-what-it-is-and-what-values-it-takes-core-072-sdk-0150-types)**
+    (core **0.7.2**) — both fields carry a localized `label` and `description`, because the generated admin
+    form is the only config UI a plugin is allowed and without them it shows an operator
+    `refreshIntervalMinutes (podcaster)` and nothing else. A **second** field, `imageSweep`
+    (`editableBy: "admin"`), demonstrates a closed **`options`** set on the one setting here where a typo
+    would cost something: it decides whether the orphan-image sweep deletes files or only names them in the
+    log, and as a free-text box `"reprot"` would validate, store, read back as saved, and silently go on
+    deleting. The backend still refuses to trust it — an unrecognised value falls back to **report-only**
+    with a `WARN`, the safe branch rather than the default one. `options` is not new host behaviour; core
+    has enforced it since it shipped, and only the SDK's TS type was behind.
+  - Also: the two roles are now both represented in the config block on purpose, which makes core 0.7.2's
+    other fix visible — a podcaster can finally *open* the plugin config page, with admin-only rows shown
+    and disabled rather than hidden. `docs/ARCHITECTURE.md` re-synced from core.
 - **2.15.0** — SDK **0.14.0**, hosted by core **0.7.0**. Two contract minors in one step (0.12.0 → 0.13.0 →
   0.14.0), both about people rather than pages.
   - **[`ctx.users` / `Users`](#a-byline-that-outlives-its-author-sdk-0130)** (0.13.0) — a highlight now

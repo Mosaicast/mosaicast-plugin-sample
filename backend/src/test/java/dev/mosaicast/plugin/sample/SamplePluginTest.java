@@ -41,6 +41,7 @@ import dev.mosaicast.plugin.testkit.SearchProviderHarness;
 import dev.mosaicast.plugin.testkit.SitemapProviderHarness;
 import dev.mosaicast.plugin.testkit.UserDataHandlerHarness;
 import java.io.ByteArrayInputStream;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -325,6 +326,55 @@ class SamplePluginTest {
         plugin.register(ctx);
 
         assertEquals(1, ctx.scheduledCount());
+        // Warned once, not once per read: register() reads the period for its log line and the test kit
+        // reads it again when the supplier is registered, and the second read sees no change.
+        List<LogEvent> warnings = ctx.logger().events(Level.WARN);
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.get(0).message().contains("refreshIntervalMinutes"));
+    }
+
+    @Test
+    void reschedulesWhenThePodcasterEditsTheRefreshInterval() {
+        // The bug SDK 0.15.0's Supplier overload exists for, in one assertion. `refreshIntervalMinutes` is
+        // `editableBy: "podcaster"`, so its value is expected to change under a running plugin — but the
+        // Duration overload captures the period during register() and the host holds it for the life of
+        // the process. The podcaster's save then succeeds, reads back correctly, and changes nothing until
+        // core restarts. `scheduledPeriods()` re-reads every registered supplier, so a plugin that
+        // captured a Duration keeps reporting 30 here and fails.
+        MapPluginConfig config = new MapPluginConfig().with("refreshIntervalMinutes", 30);
+        FakePluginContext ctx = contextWithEpisodes(config, "ep-1");
+
+        plugin.register(ctx);
+        assertEquals(List.of(Duration.ofMinutes(30)), ctx.scheduledPeriods());
+
+        config.with("refreshIntervalMinutes", 5);
+        assertEquals(List.of(Duration.ofMinutes(5)), ctx.scheduledPeriods());
+
+        // The change is announced once, at the transition — not on every consultation. The host calls the
+        // supplier before every fire, so an unconditional line would bury the log at exactly the cadence
+        // the operator is trying to tune.
+        ctx.scheduledPeriods();
+        List<LogEvent> changes = ctx.logger().events(Level.INFO).stream()
+                .filter(e -> e.message().contains("rescheduling"))
+                .toList();
+        assertEquals(1, changes.size());
+    }
+
+    @Test
+    void clampsAConfiguredIntervalThatTurnsNonPositiveAfterRegistration() {
+        // Only the value at registration is strict — after that the host tolerates a bad answer and keeps
+        // the last valid period. This plugin does not lean on that: it clamps on every read, so a
+        // podcaster who saves a 0 gets a one-minute recompute rather than a schedule frozen at whatever it
+        // happened to be. The second WARN is the transition, and there is exactly one of them.
+        MapPluginConfig config = new MapPluginConfig().with("refreshIntervalMinutes", 15);
+        FakePluginContext ctx = contextWithEpisodes(config, "ep-1");
+        plugin.register(ctx);
+        assertTrue(ctx.logger().events(Level.WARN).isEmpty());
+
+        config.with("refreshIntervalMinutes", 0);
+        assertEquals(List.of(Duration.ofMinutes(1)), ctx.scheduledPeriods());
+        assertEquals(List.of(Duration.ofMinutes(1)), ctx.scheduledPeriods());
+
         List<LogEvent> warnings = ctx.logger().events(Level.WARN);
         assertEquals(1, warnings.size());
         assertTrue(warnings.get(0).message().contains("refreshIntervalMinutes"));
@@ -504,8 +554,14 @@ class SamplePluginTest {
 
     /** A context whose blob store accepts PNGs, for the orphan-sweep tests below. */
     private static FakePluginContext contextWithBlobs(InMemoryPluginBlobs blobs, String... episodeIds) {
+        return contextWithBlobs(blobs, new MapPluginConfig(), episodeIds);
+    }
+
+    /** The same, with an {@code imageSweep} value configured. */
+    private static FakePluginContext contextWithBlobs(InMemoryPluginBlobs blobs, MapPluginConfig config,
+                                                      String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null, blobs);
+        return new FakePluginContext(new InMemoryDocStore(), config, feeds, null, blobs);
     }
 
     /** Stores one small PNG and hands back its ref. */
@@ -532,6 +588,51 @@ class SamplePluginTest {
         // outlives the document that pointed at it and only this plugin knows which those are.
         assertTrue(blobs.stat(live).isPresent(), "an image a highlight still names must survive the sweep");
         assertTrue(blobs.stat(orphan).isEmpty(), "an image nothing points at must be swept");
+    }
+
+    @Test
+    void reportsOrphansWithoutDeletingThemWhenImageSweepIsReport() {
+        InMemoryPluginBlobs blobs = pngBlobs();
+        String orphan = storePng(blobs, "dropped.png");
+        MapPluginConfig config = new MapPluginConfig().with("imageSweep", SamplePlugin.SWEEP_REPORT);
+        FakePluginContext ctx = contextWithBlobs(blobs, config, "ep-1");
+
+        plugin.register(ctx);
+
+        // The dry run an operator wants before letting anything delete their files for the first time.
+        assertTrue(blobs.stat(orphan).isPresent(), "report mode must not delete anything");
+        List<LogEvent> reports = ctx.logger().events(Level.INFO).stream()
+                .filter(e -> e.message().contains("imageSweep=report"))
+                .toList();
+        // Once per recompute, and register() does two: the eager pass, then the test kit's onSchedule
+        // running the task synchronously. Unlike the refresh-interval logging this is deliberately not
+        // deduplicated — it runs per recompute rather than per scheduler consultation, and it reports a
+        // state that is actively holding storage.
+        assertEquals(2, reports.size());
+        // The refs, not just a count: a number tells an operator nothing they can go and check.
+        assertTrue(reports.get(0).message().contains(orphan),
+                "report mode must name the orphans it left in place");
+    }
+
+    @Test
+    void refusesToDeleteOnAnImageSweepValueItDoesNotUnderstand() {
+        // `options` closes this door at write time and at load for the manifest's own default, but it
+        // cannot un-store a value written before the field declared one. The fallback is the SAFE branch,
+        // not the default one: refusing to delete on a value we do not understand costs storage, and the
+        // other way costs files.
+        InMemoryPluginBlobs blobs = pngBlobs();
+        String orphan = storePng(blobs, "dropped.png");
+        MapPluginConfig config = new MapPluginConfig().with("imageSweep", "reprot");
+        FakePluginContext ctx = contextWithBlobs(blobs, config, "ep-1");
+
+        plugin.register(ctx);
+
+        assertTrue(blobs.stat(orphan).isPresent(), "an unrecognised imageSweep must not delete anything");
+        // Two, for the two recompute passes register() performs (eager, then the test kit's synchronous
+        // onSchedule) — not one per scheduler tick.
+        List<LogEvent> warnings = ctx.logger().events(Level.WARN);
+        assertEquals(2, warnings.size());
+        assertTrue(warnings.get(0).message().contains("imageSweep"));
     }
 
     @Test

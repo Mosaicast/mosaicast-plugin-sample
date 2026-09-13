@@ -22,7 +22,10 @@ mosaicast-plugin-sample/
 ## What the sample must demonstrate
 - **Manifest** with at least two slots in different scopes (e.g. `episode/main` visible to all + `site/sidebar` podcaster-only) and `storage: "doc"`.
 - **Backend:** an endpoint that reads/writes a value per scope via `ctx.store()`, plus use of `ctx.feeds().episodesIn(scope)`.
-- **Frontend:** a Web Component via `defineMosaicastElement` from the SDK that reads `this.ctx`, injects the **theme tokens as CSS custom properties into the shadow root** (demonstrate it!), and talks to the backend via `ctx.api`.
+- **Frontend:** a Web Component via `defineMosaicastElement` from the SDK that reads `this.ctx`, injects the **theme tokens as CSS custom properties into the shadow root** (demonstrate it!), and reaches the host's doc store through `ctx.docs` — with `ctx.api` shown once as the documented escape hatch underneath it.
+- **A component that survives a reassigned `ctx`:** the render returns a `MosaicastHandle` (`{ update, destroy }`), not a bare cleanup callback — so a new `ctx` re-renders in place instead of destroying the tree and everything in it.
+- **A schedule that follows its own config:** `onSchedule` takes the `Supplier<Duration>` form wherever the period comes from `ctx.config()`, so an operator's saved interval takes effect without a restart.
+- **Config fields an operator can actually read:** a localized `label` and `description` on each field, at **both** `editableBy` levels, and a closed `options` set on the one field where a typo would cost something.
 - **Shadow DOM encapsulation:** show that host styles don't bleed through and `ctx.theme` is the way to blend into the host design.
 - **Plugin i18n (minimal):** a tiny `locales/en.json` + `de.json` used via the SDK's `createPluginI18n`, reacting to `ctx.locale` — so every plugin author sees the translation convention.
 

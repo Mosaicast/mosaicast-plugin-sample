@@ -29,6 +29,18 @@ const data = manifest.data as PluginDataDeclaration;
 /** The last path segment of a doc-store path — the doc *key*, which is what `backendOwned` matches on. */
 const keyOf = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
+/**
+ * Types into a React-controlled textarea. Assigning `.value` directly is swallowed — React's own value
+ * tracker sees no change and never fires `onChange` — so go through the native setter first.
+ */
+function typeInto(textarea: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!;
+  act(() => {
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 describe('plugin.json ↔ bundle contract', () => {
   it('defines a custom element for every tag the manifest declares', () => {
     // Drift here is the failure mode that made this plugin's deep links a hard 404 once: the manifest and
@@ -85,6 +97,20 @@ describe('plugin.json ↔ bundle contract', () => {
       for (const pattern of data.backendOwned ?? []) {
         expect(covers(pattern, key), `backendOwned "${pattern}" blocks client-written "${key}"`).toBe(false);
       }
+    }
+  });
+
+  it('gives every config field a default its own options admit', () => {
+    // A real manifest bug class, and one core only catches at load: `options` is enforced against the
+    // manifest's own `default` too, so a field whose default is not in its own set takes the whole plugin
+    // down at startup with the reason only in the admin log viewer. Cheap to assert here instead.
+    for (const [key, field] of Object.entries(manifest.config as Record<string, { default?: unknown; options?: Array<{ value: string }> }>)) {
+      if (!field.options) {
+        continue;
+      }
+      const values = field.options.map((option) => option.value);
+      expect(values, `config "${key}" declares an empty options set`).not.toHaveLength(0);
+      expect(values, `config "${key}" defaults to a value its own options exclude`).toContain(field.default);
     }
   });
 
@@ -161,6 +187,67 @@ describe('sample-highlight custom element', () => {
     await flush();
     expect(el.shadowRoot!.textContent).toContain('Second note');
     expect(el.shadowRoot!.textContent).not.toContain('First note');
+  });
+
+  it('survives a reassigned ctx instead of being torn down and rebuilt (SDK 0.15.0)', async () => {
+    // The regression the MosaicastHandle exists for. Returning a bare cleanup callback means "destroy and
+    // re-render on every ctx assignment", and the host reassigns ctx for ordinary reasons — a language
+    // switch, a consent choice. Each one used to unmount the React tree, taking component state, an open
+    // dialog and every in-flight request with it. `update` makes it a React re-render of the same root.
+    const el = document.createElement('sample-highlight') as MountedElement;
+    document.body.appendChild(el);
+    const ctxArgs = { scope: { type: 'site', id: 'main' } as const, user: mockUser('u1', 'podcaster') };
+    act(() => {
+      el.ctx = makeMockCtx(ctxArgs);
+    });
+    await flush();
+
+    const editButton = el.shadowRoot!.querySelector('button') as HTMLButtonElement;
+    act(() => {
+      editButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    const portalHost = document.body.querySelector(`[${MODAL_PORTAL_ATTR}]`)!;
+    const textarea = portalHost.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+    typeInto(textarea, 'half-written note');
+    await flush();
+
+    // A genuinely new context object — not the same one, which the SDK filters out on its own.
+    act(() => {
+      el.ctx = makeMockCtx(ctxArgs);
+    });
+    await flush();
+
+    const afterHost = document.body.querySelector(`[${MODAL_PORTAL_ATTR}]`);
+    expect(afterHost, 'the open edit modal must survive a ctx reassignment').not.toBeNull();
+    expect(afterHost!.shadowRoot!.querySelector('textarea')).toHaveProperty('value', 'half-written note');
+
+    // Cleanly torn down on a real disconnect, which is the only thing `destroy` still answers to.
+    act(() => {
+      el.remove();
+    });
+    await flush();
+    expect(document.body.querySelector(`[${MODAL_PORTAL_ATTR}]`)).toBeNull();
+  });
+
+  it('ignores an identical ctx object without re-rendering', async () => {
+    // The SDK filters this case, so a plugin does not have to diff contexts to protect itself from a host
+    // that reassigns the same object. Node identity is the assertion: a re-render would replace it.
+    const el = document.createElement('sample-highlight') as MountedElement;
+    document.body.appendChild(el);
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } });
+    act(() => {
+      el.ctx = ctx;
+    });
+    await flush();
+
+    const title = el.shadowRoot!.querySelector('.title');
+    act(() => {
+      el.ctx = ctx;
+    });
+    await flush();
+    expect(el.shadowRoot!.querySelector('.title')).toBe(title);
   });
 
   it('portals the edit modal to its own shadow root on document.body, not the light DOM or the element\'s own shadow root', async () => {
