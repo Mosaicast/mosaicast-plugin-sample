@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.15.0",
-  "platformApi": "0.14.0",
+  "version": "2.16.0",
+  "platformApi": "0.15.0",
   "name": "Sample",
   "license": "Apache-2.0",
   "author": "The Mosaicast Authors",
@@ -60,7 +60,30 @@
     "usedBy": "podcaster"
   },
   "config": {
-    "refreshIntervalMinutes": { "type": "number", "default": 30, "editableBy": "podcaster" }
+    "refreshIntervalMinutes": {
+      "type": "number",
+      "default": 30,
+      "editableBy": "podcaster",
+      "label": { "en": "Refresh interval (minutes)", "de": "Aktualisierungsintervall (Minuten)" },
+      "description": {
+        "en": "How often the backend recomputes the highlight statistics, the page listing and the favourite counts. A saved change takes effect within one old interval — the backend does not have to be restarted.",
+        "de": "Wie oft das Backend die Highlight-Statistiken, die Seitenliste und die Favoritenzähler neu berechnet. Eine gespeicherte Änderung greift innerhalb eines alten Intervalls — das Backend muss nicht neu gestartet werden."
+      }
+    },
+    "imageSweep": {
+      "type": "string",
+      "default": "delete",
+      "editableBy": "admin",
+      "label": { "en": "Orphaned image sweep", "de": "Aufräumen verwaister Bilder" },
+      "description": {
+        "en": "What the scheduled pass does with uploaded images no highlight points at any more. Nothing else on this platform collects them, so \"report\" leaks storage until someone acts on the log.",
+        "de": "Was der geplante Durchlauf mit hochgeladenen Bildern macht, auf die kein Highlight mehr zeigt. Nichts sonst auf dieser Plattform räumt sie ab, „melden“ lässt also Speicher liegen, bis jemand auf das Log reagiert."
+      },
+      "options": [
+        { "value": "delete", "label": { "en": "Delete them", "de": "Löschen" } },
+        { "value": "report", "label": { "en": "Only report them in the log", "de": "Nur im Log melden" } }
+      ]
+    }
   },
   "consent": {
     "services": [

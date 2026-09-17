@@ -232,7 +232,10 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
   ],
   "storage": "doc",
   "data":    { "readableBy": "fan", "writableBy": "podcaster", "backendOwned": ["stats", "agg:*"] },
-  "config":  { "fuzzyThreshold": { "type": "number", "default": 0.85, "editableBy": "podcaster" } },
+  "config":  { "fuzzyThreshold": { "type": "number", "default": 0.85, "editableBy": "podcaster" },
+               "rankBy": { "type": "string", "default": "lines", "editableBy": "admin",
+                           "options": [ { "value": "lines",  "label": { "en": "Lines",  "de": "Reihen" } },
+                                        { "value": "fields", "label": { "en": "Fields", "de": "Felder" } } ] } },
   "tags":    { "readsVocabulary": true, "writesEpisodes": false },
   "external": { "kinds": ["translation"], "usedBy": "podcaster" },
   "consent": { "services": [] }
@@ -248,7 +251,7 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
 - **`notifications`**: opt-in ability to put a message in a user's inbox (§17) — `{ "sends": true, "perUserPerDay": n }`, the number being what the plugin *asks* for and the operator's cap what it gets. Declared, never derived, like the blocks around it; absent means `ctx.notify` is null and the endpoint 404s. This is the one plugin surface that **writes into another user's view of the site**, so it is the one an operator most needs to see before installing.
 - **`external`**: opt-in use of the instance's external services (§16) — `kinds` names them, `usedBy` is the lowest role that may trigger a call from the plugin's **UI** (default `podcaster`, matching `data.writableBy`'s floor). Declared, never derived, like `data`, `blobs` and `tags`; absent means no external surface at all. `kinds` is a list although translation is the only member today, so a plugin that later wants transcription adds an entry rather than a second block.
 - **`consent`**: third-party services the plugin loads — one declaration each (`id`, `name`, `provider`, `category`, `privacyUrl`, `hosts`, `thirdCountryTransfer`, `storage[]`); the visitor decides per *category*, and `hosts` doubles as the CSP allow-list (§12.5). Omit the key entirely when the plugin loads nothing third-party.
-- **`config`**: declared fields are rendered by core as a **generic admin form** (respecting `editableBy`) — plugins never build their own config UI.
+- **`config`**: declared fields are rendered by core as a **generic admin form** (respecting `editableBy`) — plugins never build their own config UI. A field may carry **`label`** and **`description`**, which is what an operator actually reads: without them the form could only show the identifier its author chose — `ingestIntervalSeconds (podcaster)` — with no room to say what the setting does, what unit it is in, or what a sane value looks like, and the plugin cannot make up the difference because building its own UI is exactly what it may not do. Both take the same two shapes as an option's label (a plain string, or an object keyed by locale) and resolve in the browser by the same fallback chain; the field key stays visible beside the label, because a plugin's own documentation names the identifier. Prose is not a correctness concern, so the host validates only the shape and never the content, and a field that declares neither reads exactly as it did before. Purely additive, like `options` — **no `platformApi` bump**. A field may declare **`options`**, the closed set of values it accepts: core renders a select instead of a text box and **refuses anything outside the set**, at load for the manifest's own `default` and at write time for an operator's override. Without it a field whose plugin understood two words was a free-text box, where a typo validated, stored, and then fell back silently at read time — reporting a saved setting that did nothing. Each option's `label` is the one manifest string the host **localises**: either a plain string, exactly like the verbatim `nav` and `consent` labels, or an object keyed by locale (`{ "en": "Lines", "de": "Reihen" }`), resolved in the browser against the language the operator is reading in — falling back locale → base language → `en` → any label → the raw value. It is resolved there rather than server-side because the host learns the operator's language from the SPA, and switching it must not need a refetch. Purely additive: an older manifest declares no options and stays free-form, so **no `platformApi` bump**.
 - **`license` / `author` / `homepage` / `attribution`**: credit, shown on the public About page (§12.6). All optional and **never validated** — a plugin written before these existed must keep loading, and an oddly-spelled licence is still a working plugin; credit is not a correctness concern. `attribution` is separate from `homepage` because "where this lives" and "who deserves credit for it" are not the same link: a plugin that borrows data, artwork or an upstream library should be able to say so without giving up its own page. Purely additive in both directions — the host ignores unknown manifest fields, and the SDK's `PluginManifest` type is documentation for an author's editor with no runtime effect, the host remaining the sole validator — so **no `platformApi` bump**, which matters because that check is an exact `major.minor` match and a bump would reject every installed plugin until each one re-released.
 
 ### 7.3 Slots & placements
@@ -269,8 +272,14 @@ public interface PluginContext {
                              // `notifier`, not `notify`: Object.notify() is final in Java
     PluginConfig config();
     FeedAccess   feeds();
-    void onSchedule(Duration every, Runnable task); // ShedLock-wrapped
-}
+    void onSchedule(Supplier<Duration> every, Runnable task); // ShedLock-wrapped; period re-read per tick
+    default void onSchedule(Duration every, Runnable task);   // fixed cadence, captured once
+}   // The supplier form (platformApi 0.15.0) is what a configurable interval needs: the host consults it
+    // before every fire and reschedules when the answer changes, so an operator's edit takes effect within
+    // one old period instead of at the next restart. It is consulted, not trusted — null, a non-positive
+    // Duration or a throw leaves the task on the last period that was valid, and only the value at
+    // registration is strict. The host clamps to an operator-owned floor (`mosaicast.plugin-schedule
+    // .min-period`, default 10s): the period is a request, like the manifest's other numbers.
 interface DocStore {
     <T> Optional<T> get(Scope scope, String key, Class<T> type);
     void            put(Scope scope, String key, Object value);
