@@ -1384,7 +1384,7 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
-- **2.17.0** — SDK **0.16.0**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
+- **2.17.0** — SDK **0.16.1**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
   and this plugin had two of the things they found.
   - **Security: highlight Markdown goes through `ctx.sanitize`.** Both render paths ran
     `DOMPurify.sanitize(html)` with no config, which lets `<style>` and `style=` through — under the contract's
@@ -1395,6 +1395,10 @@ that output path works unmodified.
     policy keeps only `href`s starting `http(s):`, `mailto:`, `tel:`, `#` or `/`, so a relative Markdown link
     like `[notes](notes.html)` now renders as text with no link — write it as `/p/sample/…` or a full URL.
     External links now open in a new tab with `rel="noopener noreferrer nofollow ugc"`.
+  - **SDK 0.16.1** widens that policy by `start` and `align`, so a numbered list that resumes after a paragraph
+    keeps its numbers and a table keeps its column alignment; `Highlight.test.tsx` pins both. The test kit's
+    `sanitizeLikeHost` now matches core element by element. The host applies whichever lists *it* was built
+    with: on core 0.7.4 a resumed list still renumbers from 1 until the next core release, which pins 0.16.1.
   - **`data.readsAllUsers: true`**, and the favourite tally reads through `ctx.allUsers()`.
     `DocStore.queryAcrossUsers` no longer exists: reading every visitor's partition is now declared, so an
     operator sees before installing that this plugin tallies its visitors' favourites. `everyonesFavourites`

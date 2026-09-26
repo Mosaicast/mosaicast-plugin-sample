@@ -99,6 +99,27 @@ describe('Highlight — episode scope', () => {
     expect(content.querySelector('[style]')).toBeNull();
   });
 
+  it('keeps a resumed list number and table alignment through the sanitizer (SDK 0.16.1)', async () => {
+    // Ordinary Markdown the 0.16.0 policy broke: `marked` writes `<ol start="3">` for a list that resumes
+    // after a paragraph and `align` for a column's alignment. Dropping `start` renumbers from 1, which
+    // changes what the list says.
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
+          markdown: '3. third\n4. fourth\n\n| Time | Topic |\n| :--: | ----- |\n| 12:00 | Kraken |',
+        },
+      }),
+    });
+
+    const container = mount(ctx);
+    await flush();
+
+    const content = container.querySelector('.content')!;
+    expect(content.querySelector('ol')?.getAttribute('start')).toBe('3');
+    expect(content.querySelector('th')?.getAttribute('align')).toBe('center');
+  });
+
   it('shows the fallback when there is no highlight yet', async () => {
     const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-2' } });
 
