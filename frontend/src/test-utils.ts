@@ -119,6 +119,7 @@ export function docsRecording(docs: MockDocClient): RecordingDocClient {
       reads.push(`${name(target)}/${key}`);
       return docs.get<T>(target, key);
     },
+    getMany: docs.getMany.bind(docs),
     put: docs.put.bind(docs),
     list: docs.list.bind(docs),
     remove: docs.remove.bind(docs),
@@ -140,6 +141,7 @@ export function docsFailing(
   return {
     get: <T>(target: DocTarget, key: string) =>
       verb === 'get' ? Promise.reject(error) : docs.get<T>(target, key),
+    getMany: docs.getMany.bind(docs),
     put: <T>(target: DocTarget, key: string, value: T) =>
       verb === 'put' ? Promise.reject(error) : docs.put<T>(target, key, value),
     list: docs.list.bind(docs),

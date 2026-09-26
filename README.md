@@ -321,7 +321,7 @@ modal inside an already-portalled modal is more machinery than one destructive c
 ### Backend `PluginContext` (ARCHITECTURE §7.4) — `backend/.../SamplePlugin.java`
 | Member | What this plugin does with it |
 |---|---|
-| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
+| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `allUsers().query("fav:")` (backend-only, no HTTP surface; declared as `data.readsAllUsers` since SDK 0.16.0) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
 | `blobs()` | New in 0.8.0 — the scheduled recompute also **sweeps orphaned images**: it collects every `image.ref` the highlight docs still name, pages `blobs().list(…)`, and deletes the rest. Nothing on this platform collects orphans, and a blob outlives the document that named it, so without this every swapped picture leaks a file. The frontend deletes the ref it just stopped pointing at; this is the net under it, for the tab closed mid-edit and the `remove` that failed. Since 2.16.0 an admin can put it in report-only mode with the `imageSweep` config field. See [below](#the-sweep-can-only-collect-what-the-backend-can-enumerate) for the constraint that shapes it. |
 | `locales()` | New in 0.10.0 — the recompute pass reads `contentLocales()`/`defaultLocale()` once per pass (a registry an admin edits, so re-reading it mid-walk would let a setting change halfway through), and runs **`isContentLocale(code)` on every `translations` key it reads**. Those keys are client input: they sit inside a JSON value, so the host's doc-key pattern never sees them. A key that fails is **counted and left alone** — see [below](#two-locale-lists-and-picking-the-wrong-one-is-silent-sdk-0100) for why deleting would be the wrong call. |
 | `translation()` | New in 0.10.0 — the same pass **drafts** the languages nobody has written yet into a separate `backendOwned` `drafts` document the edit modal offers and a reader never sees. `null` on the manifest alone here: `usedBy` is browser-only, because a backend runs on a timer with no visitor and no role. `TranslationException` is **checked**, and `retryable()` decides whether the pass stops or moves to the next language. Capped at five calls a pass — this runs unattended, on somebody else's metered API. See [below](#machine-translation-is-a-draft-and-says-so-twice-sdk-0110). |
@@ -408,7 +408,7 @@ and no consent category.
 `authorId` lives in a **shared-scope document**, and a shared-scope document has no owner: anything above
 `data.writableBy` could `PUT` any UUID there, exactly as it could rewrite the prose next to it. Nothing in
 this plugin decides anything on it. The user ids it genuinely knows to be true are the ones the *host*
-resolves from a partition — the `fav:` marks `queryAcrossUsers` reads, where the owner comes from the
+resolves from a partition — the `fav:` marks `ctx.allUsers()` reads, where the owner comes from the
 partition the document sits in and never from a client.
 
 It is also **preserve-or-set**, not overwrite: a second podcaster fixing a typo is not the author.
@@ -481,7 +481,7 @@ tick, so the record *is* advanced — a plugin retrying a malformed link forever
 ### Two capabilities this plugin declines, and why
 
 - **No favouriter avatars.** The trustworthy user ids here are the favouriters', not the author's — they come
-  from `queryAcrossUsers`, host-resolved from the partition. Publishing them as an "also favourited by" row
+  from `ctx.allUsers()`, host-resolved from the partition. Publishing them as an "also favourited by" row
   would have been the textbook §8.8 leaderboard. It is not here because the whole `data/user/me/fav:<slug>`
   design rests on a mark being unreachable from any browser but its owner's, and publishing the list would
   undo that with the plugin's own hands. Notifying somebody is not the same as naming them to a stranger: the
@@ -920,17 +920,18 @@ key. That is the exact inverse of the old convention, and it is the whole point:
 
 **Counting it is the backend's job.** Per-user docs are not addressable from another browser, by design, so
 a tally cannot be assembled client-side any more. It never should have been: a summary each browser reports
-about itself is a summary of whatever its user typed. `SamplePlugin.tallyFavourites` uses the 0.5.0
-backend-only read instead, and publishes the result where the frontend can read it:
+about itself is a summary of whatever its user typed. `SamplePlugin.tallyFavourites` uses the backend-only
+cross-user read instead — declared in the manifest as `"data": { "readsAllUsers": true }` since SDK 0.16.0,
+without which `ctx.allUsers()` is `null` — and publishes the result where the frontend can read it:
 
 ```java
-for (OwnedDocEntry entry : ctx.store().queryAcrossUsers("fav:")) { … }   // userId is host-resolved
+for (OwnedDocEntry entry : ctx.allUsers().query("fav:")) { … }   // userId is host-resolved
 ctx.store().put(Scope.episode(slug), "favourites", new FavouriteCount(n));
 ```
 
 Two consequences worth copying:
 - **A backend has no calling user**, so *every* `DocStore` method — reads included — throws
-  `UnsupportedOperationException` for a `USER` scope. `queryAcrossUsers` is the only door, and it has no
+  `UnsupportedOperationException` for a `USER` scope. `ctx.allUsers()` is the only door, and it has no
   HTTP surface, so no visitor's request can reach another visitor's data through it.
 - **Zero is a deletion, not a `{"count": 0}`**: an episode nobody favourited and one whose last favourite
   was withdrawn are the same state. `SamplePluginTest` asserts both directions, seeding what a frontend
@@ -1383,6 +1384,24 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.17.0** — SDK **0.16.0**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
+  and this plugin had two of the things they found.
+  - **Security: highlight Markdown goes through `ctx.sanitize`.** Both render paths ran
+    `DOMPurify.sanitize(html)` with no config, which lets `<style>` and `style=` through — under the contract's
+    `style-src 'unsafe-inline'` a podcaster-written stylesheet is a full-viewport overlay over the site, or
+    attribute-selector CSS that leaks form values. The wiki plugin was defaced exactly that way.
+    `ctx.sanitize` is the host's own feed-HTML policy, run after Markdown rendering; the direct `dompurify`
+    dependency is gone, and `Highlight.test.tsx` fails if a stylesheet survives.
+  - **`data.readsAllUsers: true`**, and the favourite tally reads through `ctx.allUsers()`.
+    `DocStore.queryAcrossUsers` no longer exists: reading every visitor's partition is now declared, so an
+    operator sees before installing that this plugin tallies its visitors' favourites. `everyonesFavourites`
+    throws if the declaration ever goes missing, rather than publishing "nobody favourited anything".
+  - **Text, links and focus rings use `--mc-accent-text`** (12 rules); fills keep `--mc-accent`. The seed is
+    unchecked against the page — a pale one measured 1.12:1 as link text.
+  - **`refreshIntervalMinutes` declares `min: 1`, `max: 1440`, `step: 1`.** `0` used to save and switch the
+    rollup off; the host now refuses it on write, naming the bound. The backend clamp stays for the fallback.
+  - **The `social` consent category has a name** (`consent.categoryLabels`): "Sharing buttons" /
+    "Teilen-Schaltflächen" with a one-line hint, instead of the bare id between two explained categories.
 - **2.16.0** — SDK **0.15.0**, hosted by core **0.7.2**. One contract minor, and unusually it is a release
   that fixes bugs this plugin *had* rather than adding a surface it lacked.
   - **[A schedule that follows its config](#two-ways-to-be-configurable--and-why-this-plugin-uses-both)** —

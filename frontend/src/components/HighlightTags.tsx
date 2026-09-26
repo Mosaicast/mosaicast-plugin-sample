@@ -89,7 +89,7 @@ export function HighlightTags({
         .tags .tagsLabel { color: var(--mc-text-muted); display: inline-flex; align-items: center;
           gap: 0.25rem; }
         .tags a { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.1rem 0.45rem;
-          border: 1px solid var(--mc-border); border-radius: 999px; color: var(--mc-accent);
+          border: 1px solid var(--mc-border); border-radius: 999px; color: var(--mc-accent-text);
           text-decoration: none; }
         .tags a:hover { border-color: var(--mc-accent); }
         .tags .count { color: var(--mc-text-muted); font-size: 0.75rem; }

@@ -78,6 +78,27 @@ describe('Highlight — episode scope', () => {
     expect(container.innerHTML).not.toContain('<script>');
   });
 
+  it('drops a stylesheet in the markdown, which DOMPurify defaults let through (SDK 0.16.0)', async () => {
+    // The payload that defaced the wiki plugin: under the contract's `style-src 'unsafe-inline'` a
+    // podcaster-written `<style>` becomes a full-viewport overlay. `ctx.sanitize` applies the host's policy.
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
+          markdown: 'Fine <style>:host{position:fixed;inset:0}</style><span style="position:fixed">x</span>',
+        },
+      }),
+    });
+
+    const container = mount(ctx);
+    await flush();
+
+    const content = container.querySelector('.content')!;
+    expect(content.textContent).toContain('Fine');
+    expect(content.querySelector('style')).toBeNull();
+    expect(content.querySelector('[style]')).toBeNull();
+  });
+
   it('shows the fallback when there is no highlight yet', async () => {
     const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-2' } });
 

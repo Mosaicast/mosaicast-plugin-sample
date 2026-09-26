@@ -4,6 +4,7 @@
 package dev.mosaicast.plugin.sample;
 
 import dev.mosaicast.plugin.api.BlobInfo;
+import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.LocaleInfo;
@@ -73,7 +74,7 @@ import tools.jackson.databind.JsonNode;
  *       housekeeping job no per-request code path can do.
  *   <li><strong>Aggregate across users</strong> (SDK 0.5.0): the same pass tallies every visitor's
  *       {@code fav:<episodeSlug>} mark out of their own {@link dev.mosaicast.plugin.api.ScopeType#USER}
- *       partition via {@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} and publishes a
+ *       partition via {@link dev.mosaicast.plugin.api.CrossUserStore#query(String) ctx.allUsers().query(...)} and publishes a
  *       per-episode count to an episode scope the frontend may read. This is the only way that number can
  *       be assembled at all — per-user documents live at {@code data/user/me/…}, which resolves to the
  *       <em>caller's</em> partition, so no browser can count anybody but itself. It is also the only way
@@ -1109,7 +1110,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     /**
      * Counts every visitor's {@code fav:<episodeSlug>} mark, keyed by episode slug.
      *
-     * <p>{@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} is the backend's <em>only</em>
+     * <p>{@link dev.mosaicast.plugin.api.CrossUserStore#query(String) ctx.allUsers().query(...)} is the backend's <em>only</em>
      * window onto {@code USER} partitions: {@code store().get(Scope.user(), …)} and friends throw
      * {@link UnsupportedOperationException}, because a scheduled task has no calling user and resolving
      * {@code "me"} without one would have to pick somebody. There is no HTTP surface for this method
@@ -1135,9 +1136,31 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      *                       {@code null} to count everyone
      * @return the favouriters of each episode that has any, keyed by episode slug
      */
+    /**
+     * Every visitor's {@code fav:} marks, across all their {@code USER} partitions (SDK 0.16.0).
+     *
+     * <p>The one read in this plugin that crosses an ownership boundary, so the manifest declares it —
+     * {@code "data": { "readsAllUsers": true }} — and {@code ctx.allUsers()} is {@code null} without that.
+     * Until 0.16.0 it was {@code ctx.store().queryAcrossUsers(...)}, reachable by any plugin by merely existing;
+     * now an operator can read off the manifest that this one tallies its visitors' favourites.
+     *
+     * <p>{@code null} here means the manifest and this code disagree, which is a bug to see, not a state to
+     * degrade through: an empty tally would publish "nobody favourited anything" as if it were true.
+     *
+     * @throws IllegalStateException if the manifest no longer declares {@code data.readsAllUsers}
+     */
+    private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx) {
+        CrossUserStore everyone = ctx.allUsers();
+        if (everyone == null) {
+            throw new IllegalStateException(
+                    "plugin.json no longer declares data.readsAllUsers, which favourite counts need");
+        }
+        return everyone.query(FAVOURITE_KEY_PREFIX);
+    }
+
     private static Map<String, List<UUID>> tallyFavourites(PluginContext ctx, UUID excludedUserId) {
         Map<String, List<UUID>> byEpisode = new HashMap<>();
-        for (OwnedDocEntry entry : ctx.store().queryAcrossUsers(FAVOURITE_KEY_PREFIX)) {
+        for (OwnedDocEntry entry : everyonesFavourites(ctx)) {
             if (excludedUserId != null && excludedUserId.equals(entry.userId())) {
                 continue;
             }
@@ -1594,7 +1617,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * anything; it recomputes from the current store while skipping this user, which yields the same answer
      * however many times it runs. {@code UserDataHandlerHarness.eraseTwice} is that test. Note handlers run
      * <strong>before</strong> core drops the account row, so the marks are still visible to
-     * {@code queryAcrossUsers} at this moment — hence the filter rather than a plain re-tally.
+     * {@code allUsers().query(...)} at this moment — hence the filter rather than a plain re-tally.
      *
      * <p><strong>Throwing is the right answer to a failure.</strong> §12.8: the host writes a row per plugin
      * before it asks and leaves an <em>open record</em> on a failure rather than a log line, then retries
@@ -1641,7 +1664,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         UUID id = UUID.fromString(Objects.requireNonNull(userId, "userId"));
         Set<String> inFeed = Set.copyOf(ctx.feeds().episodesIn(Scope.site()));
         List<Map<String, Object>> marks = new ArrayList<>();
-        for (OwnedDocEntry entry : ctx.store().queryAcrossUsers(FAVOURITE_KEY_PREFIX)) {
+        for (OwnedDocEntry entry : everyonesFavourites(ctx)) {
             if (!id.equals(entry.userId()) || isWithdrawnMark(entry.value())) {
                 continue;
             }

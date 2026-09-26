@@ -28,6 +28,7 @@ function mount(ctx: PluginContext) {
 const snapshot = (over: Partial<DisplaySnapshot> = {}): DisplaySnapshot => ({
   title: 'The Kraken',
   description: 'notes',
+  descriptionText: 'notes',
   ...over,
 });
 

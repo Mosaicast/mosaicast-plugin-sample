@@ -5,7 +5,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { matchRoute, type BlobQuota, type PluginContext, type PluginRoute, type Scope } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
 import { HighlightModal } from './HighlightModal';
@@ -88,9 +87,15 @@ function internalLink(route: PluginRoute, subpath: string) {
   };
 }
 
-/** Renders markdown to sanitized HTML — never trust a podcaster-authored string verbatim (ARCHITECTURE §12.6). */
-function renderMarkdown(markdown: string): string {
-  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
+/**
+ * Renders markdown to HTML safe for `innerHTML` — never trust a podcaster-authored string verbatim
+ * (ARCHITECTURE §12.6). Sanitized by `ctx.sanitize` (SDK 0.16.0), the host's own feed-HTML policy, and **after** rendering,
+ * since Markdown can emit raw HTML. Until 2.17.0 this ran DOMPurify with its defaults, which let `<style>`
+ * and `style=` through — a full-viewport overlay or attribute-selector CSS under the contract's
+ * `style-src 'unsafe-inline'`.
+ */
+function renderMarkdown(markdown: string, sanitize: PluginContext['sanitize']): string {
+  return sanitize(marked.parse(markdown, { async: false }) as string);
 }
 
 /**
@@ -547,7 +552,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .title {
           font-size: 0.85rem;
           font-weight: 600;
-          color: var(--mc-accent);
+          color: var(--mc-accent-text);
         }
         .content :where(p) { margin: 0 0 0.5rem; }
         .content :where(p:last-child) { margin-bottom: 0; }
@@ -574,7 +579,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           gap: 0.3rem;
         }
         .listen { margin: 0.5rem 0 0; font-size: 0.85rem; }
-        .listen a { color: var(--mc-accent); }
+        .listen a { color: var(--mc-accent-text); }
         .empty {
           margin: 0;
           color: var(--mc-text-muted);
@@ -603,10 +608,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .browse { margin-top: 0.75rem; }
         .browse .browseTitle { margin: 0 0 0.25rem; font-size: 0.8rem; font-weight: 600; color: var(--mc-text); }
         .browse ul { margin: 0; padding-left: 1.1rem; }
-        .browse a, .back { color: var(--mc-accent); }
+        .browse a, .back { color: var(--mc-accent-text); }
         .browse .episodeLink { margin-left: 0.4rem; font-size: 0.75rem; color: var(--mc-text-muted); }
         .back { display: inline-block; margin-bottom: 0.5rem; font-size: 0.8rem; }
-        .filterNote a { color: var(--mc-accent); }
+        .filterNote a { color: var(--mc-accent-text); }
         button {
           background: var(--mc-accent);
           color: var(--mc-accent-contrast);
@@ -681,7 +686,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           <div
             className="content"
             lang={shown.locale}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown) }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown, ctx.sanitize) }}
           />
           {/* Provenance, shown to the reader and not only to the podcaster. The SDK's rule that machine
               output is a draft is about not passing it off as an original: a paragraph an engine wrote is

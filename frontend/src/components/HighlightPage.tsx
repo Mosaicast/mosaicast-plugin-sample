@@ -13,7 +13,6 @@ import {
   type PluginRoute,
 } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
 import { DETAIL_PREFIX, PAGE_ENTRIES, PAGE_PATTERNS } from '../page-entries';
@@ -48,9 +47,15 @@ interface HighlightIndex {
 const SORTS = ['newest', 'favourites'] as const;
 type Sort = (typeof SORTS)[number];
 
-/** Renders markdown to sanitized HTML — never trust a podcaster-authored string verbatim (§12.6). */
-function renderMarkdown(markdown: string): string {
-  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
+/**
+ * Renders markdown to HTML safe for `innerHTML` — never trust a podcaster-authored string verbatim
+ * (§12.6). Sanitized by `ctx.sanitize` (SDK 0.16.0), the host's own feed-HTML policy, and **after** rendering,
+ * since Markdown can emit raw HTML. Until 2.17.0 this ran DOMPurify with its defaults, which let `<style>`
+ * and `style=` through — a full-viewport overlay or attribute-selector CSS under the contract's
+ * `style-src 'unsafe-inline'`.
+ */
+function renderMarkdown(markdown: string, sanitize: PluginContext['sanitize']): string {
+  return sanitize(marked.parse(markdown, { async: false }) as string);
 }
 
 /**
@@ -296,7 +301,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
            and not a failed image. */
         .card .thumb.blank {
           display: flex; align-items: center; justify-content: center;
-          color: color-mix(in oklab, var(--mc-accent) 55%, var(--mc-text-muted));
+          color: color-mix(in oklab, var(--mc-accent-text) 55%, var(--mc-text-muted));
           background:
             linear-gradient(135deg,
               color-mix(in oklab, var(--mc-accent) 14%, transparent) 0%,
@@ -322,7 +327,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
         .stamp {
           flex: none; min-width: 4.2rem;
           display: inline-flex; align-items: center; gap: 0.3rem;
-          font-variant-numeric: tabular-nums; font-size: 0.85rem; font-weight: 600; color: var(--mc-accent);
+          font-variant-numeric: tabular-nums; font-size: 0.85rem; font-weight: 600; color: var(--mc-accent-text);
           text-decoration: none;
         }
         .timeline .what { min-width: 0; }
@@ -330,7 +335,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
            show notes and wrong in a list where the title *is* the row, so these are restyled to read as
            headings that happen to be clickable, matching the cards on the other views. */
         .timeline .name { font-size: 0.88rem; font-weight: 600; color: var(--mc-text); text-decoration: none; }
-        .timeline .name:hover { color: var(--mc-accent); text-decoration: underline; }
+        .timeline .name:hover { color: var(--mc-accent-text); text-decoration: underline; }
         .timeline .excerpt { margin: 0.1rem 0 0; font-size: 0.8rem; color: var(--mc-text-muted); }
 
         .todo { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -338,7 +343,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
           display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
           border: 1px dashed var(--mc-border); border-radius: 0.6rem; padding: 0.5rem 0.7rem; font-size: 0.88rem;
         }
-        .todo a { color: var(--mc-accent); display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; }
+        .todo a { color: var(--mc-accent-text); display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; }
 
         .detail { border: 1px solid var(--mc-border); border-radius: 0.75rem; background: var(--mc-surface); padding: 1rem 1.1rem; }
         .detail .image { display: block; max-width: 100%; height: auto; border-radius: 0.5rem; margin-bottom: 0.75rem; }
@@ -351,7 +356,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
           background: var(--mc-accent); color: var(--mc-accent-contrast);
           border-radius: 0.5rem; padding: 0.4rem 0.8rem; text-decoration: none; font-size: 0.85rem;
         }
-        .back { display: inline-flex; align-items: center; gap: 0.3rem; margin-bottom: 0.6rem; color: var(--mc-accent); font-size: 0.85rem; }
+        .back { display: inline-flex; align-items: center; gap: 0.3rem; margin-bottom: 0.6rem; color: var(--mc-accent-text); font-size: 0.85rem; }
         .empty { margin: 0; padding: 1.5rem; text-align: center; color: var(--mc-text-muted); font-style: italic;
                  border: 1px dashed var(--mc-border); border-radius: 0.75rem; }
         .notFound { text-align: center; padding: 2.5rem 1rem; }
@@ -835,7 +840,7 @@ function DetailView({
           <div
             className="content"
             lang={shown.locale}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown) }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown, ctx.sanitize) }}
           />
           {/* The same two provenance notes the episode slot shows, and for the same reason: a reader who
               cannot tell machine output from the podcaster's own words is the one actually harmed. They
