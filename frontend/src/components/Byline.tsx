@@ -113,7 +113,8 @@ export function useAuthors(ctx: PluginContext, ids: string[]): Map<string, UserR
         // A byline is decoration on top of a highlight that reads fine without it, so a failure leaves the
         // map empty and every row falls through to the "former contributor" branch rather than showing an
         // error nobody can act on. Deliberately not `.catch(() => undefined)` on a `get`: this is a real
-        // rejection from a real call, not the 404 that means "nothing written yet".
+        // rejection from a real call, not the absent-document answer (a 204 since SDK 0.16.0) that `get`
+        // already turns into `null`.
         ctx.log('warn', 'resolving highlight authors failed; bylines will read as former contributors');
       });
     return () => {

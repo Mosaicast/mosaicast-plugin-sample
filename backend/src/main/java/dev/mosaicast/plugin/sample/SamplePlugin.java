@@ -1108,6 +1108,28 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     }
 
     /**
+     * Every visitor's {@code fav:} marks, across all their {@code USER} partitions (SDK 0.16.0).
+     *
+     * <p>The one read in this plugin that crosses an ownership boundary, so the manifest declares it —
+     * {@code "data": { "readsAllUsers": true }} — and {@code ctx.allUsers()} is {@code null} without that.
+     * Until 0.16.0 it was {@code ctx.store().queryAcrossUsers(...)}, reachable by any plugin by merely existing;
+     * now an operator can read off the manifest that this one tallies its visitors' favourites.
+     *
+     * <p>{@code null} here means the manifest and this code disagree, which is a bug to see, not a state to
+     * degrade through: an empty tally would publish "nobody favourited anything" as if it were true.
+     *
+     * @throws IllegalStateException if the manifest no longer declares {@code data.readsAllUsers}
+     */
+    private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx) {
+        CrossUserStore everyone = ctx.allUsers();
+        if (everyone == null) {
+            throw new IllegalStateException(
+                    "plugin.json no longer declares data.readsAllUsers, which favourite counts need");
+        }
+        return everyone.query(FAVOURITE_KEY_PREFIX);
+    }
+
+    /**
      * Counts every visitor's {@code fav:<episodeSlug>} mark, keyed by episode slug.
      *
      * <p>{@link dev.mosaicast.plugin.api.CrossUserStore#query(String) ctx.allUsers().query(...)} is the backend's <em>only</em>
@@ -1136,28 +1158,6 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      *                       {@code null} to count everyone
      * @return the favouriters of each episode that has any, keyed by episode slug
      */
-    /**
-     * Every visitor's {@code fav:} marks, across all their {@code USER} partitions (SDK 0.16.0).
-     *
-     * <p>The one read in this plugin that crosses an ownership boundary, so the manifest declares it —
-     * {@code "data": { "readsAllUsers": true }} — and {@code ctx.allUsers()} is {@code null} without that.
-     * Until 0.16.0 it was {@code ctx.store().queryAcrossUsers(...)}, reachable by any plugin by merely existing;
-     * now an operator can read off the manifest that this one tallies its visitors' favourites.
-     *
-     * <p>{@code null} here means the manifest and this code disagree, which is a bug to see, not a state to
-     * degrade through: an empty tally would publish "nobody favourited anything" as if it were true.
-     *
-     * @throws IllegalStateException if the manifest no longer declares {@code data.readsAllUsers}
-     */
-    private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx) {
-        CrossUserStore everyone = ctx.allUsers();
-        if (everyone == null) {
-            throw new IllegalStateException(
-                    "plugin.json no longer declares data.readsAllUsers, which favourite counts need");
-        }
-        return everyone.query(FAVOURITE_KEY_PREFIX);
-    }
-
     private static Map<String, List<UUID>> tallyFavourites(PluginContext ctx, UUID excludedUserId) {
         Map<String, List<UUID>> byEpisode = new HashMap<>();
         for (OwnedDocEntry entry : everyonesFavourites(ctx)) {

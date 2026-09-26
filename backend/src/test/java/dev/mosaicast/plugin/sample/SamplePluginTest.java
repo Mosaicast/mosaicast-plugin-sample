@@ -145,6 +145,22 @@ class SamplePluginTest {
     }
 
     @Test
+    void refusesToTallyFavouritesWithoutTheReadsAllUsersDeclaration() {
+        // What the host hands a plugin whose manifest dropped `data.readsAllUsers`: `allUsers()` is null.
+        // Degrading to an empty tally would publish "nobody favourited anything" as a fact, so the recompute
+        // in register() throws instead — and the host refuses to load a plugin whose register() throws,
+        // which is the loud failure a manifest/code disagreement deserves.
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+        ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> plugin.register(ctx));
+
+        assertTrue(thrown.getMessage().contains("data.readsAllUsers"), thrown.getMessage());
+        assertTrue(ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class).isEmpty());
+    }
+
+    @Test
     void clearsAnEpisodesFavouriteCountWhenTheLastVisitorWithdrawsIt() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
         UUID alice = UUID.randomUUID();

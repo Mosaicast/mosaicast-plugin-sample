@@ -20,7 +20,7 @@ export interface SiteSettings {
  *
  * **This is the one place in the plugin that still builds a path by hand, and it is on purpose.**
  * Everywhere else moved to `ctx.docs` in 2.12.0, which is the right default: it builds the path, validates
- * the key against the host's pattern before a 400 round-trip, and turns a 404 into `null`. But `ctx.api`
+ * the key against the host's pattern before a 400 round-trip, and resolves an unwritten key to `null`. But `ctx.api`
  * did not go away — the SDK keeps it as the documented escape hatch for anything the typed client does not
  * cover, and a reference plugin that used only the sugar would leave an author guessing whether the raw
  * client was still supported. It is. `ctx.docs.get('site', 'settings')` would be the idiomatic call here;
@@ -63,8 +63,8 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
 
   useEffect(() => {
     // `getOrNull` on the raw client (SDK 0.9.0), which is the escape hatch's half of the same fix
-    // `ctx.docs.get` has: "nothing saved yet" is the ordinary state of a settings document, so a 404 is an
-    // answer. Every other status still rejects, and the catch below is a real error path again rather than
+    // `ctx.docs.get` has: "nothing saved yet" is the ordinary state of a settings document, and the host's
+    // 204 for it (SDK 0.16.0; a 404 before) resolves `null`. Every other status still rejects, and the catch below is a real error path again rather than
     // the `.catch(() => setSettings({}))` that reported a 500 to the podcaster as an empty form.
     ctx.api
       .getOrNull<SiteSettings>(SETTINGS_PATH)

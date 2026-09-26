@@ -43,8 +43,9 @@ import { isPluginApiError } from '@mosaicast/plugin-sdk';
  *   an error.
  * - anything else — a real failure, including the network one that carries no status at all.
  *
- * There is deliberately no `404` case: absence never reaches here, because every read in this plugin uses
- * `ctx.docs.get` or `getOrNull`. A 404 arriving here would mean a genuine bug.
+ * There is deliberately no `404` case: absence never reaches here. Since SDK 0.16.0 the host answers an
+ * unwritten key with **204**, which `ctx.docs.get` and `getOrNull` resolve to `null`; a 404 now means a wrong
+ * address, i.e. a genuine bug, and falls into the generic branch.
  */
 export function describeApiError(e: unknown): { key: string; detail?: string } {
   if (!isPluginApiError(e)) {

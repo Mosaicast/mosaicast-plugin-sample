@@ -1391,15 +1391,21 @@ that output path works unmodified.
     `style-src 'unsafe-inline'` a podcaster-written stylesheet is a full-viewport overlay over the site, or
     attribute-selector CSS that leaks form values. The wiki plugin was defaced exactly that way.
     `ctx.sanitize` is the host's own feed-HTML policy, run after Markdown rendering; the direct `dompurify`
-    dependency is gone, and `Highlight.test.tsx` fails if a stylesheet survives.
+    dependency is gone, and `Highlight.test.tsx` fails if a stylesheet survives. One visible side effect: the
+    policy keeps only `href`s starting `http(s):`, `mailto:`, `tel:`, `#` or `/`, so a relative Markdown link
+    like `[notes](notes.html)` now renders as text with no link — write it as `/p/sample/…` or a full URL.
+    External links now open in a new tab with `rel="noopener noreferrer nofollow ugc"`.
   - **`data.readsAllUsers: true`**, and the favourite tally reads through `ctx.allUsers()`.
     `DocStore.queryAcrossUsers` no longer exists: reading every visitor's partition is now declared, so an
     operator sees before installing that this plugin tallies its visitors' favourites. `everyonesFavourites`
     throws if the declaration ever goes missing, rather than publishing "nobody favourited anything".
-  - **Text, links and focus rings use `--mc-accent-text`** (12 rules); fills keep `--mc-accent`. The seed is
-    unchecked against the page — a pale one measured 1.12:1 as link text.
-  - **`refreshIntervalMinutes` declares `min: 1`, `max: 1440`, `step: 1`.** `0` used to save and switch the
-    rollup off; the host now refuses it on write, naming the bound. The backend clamp stays for the fallback.
+  - **Text and links use `--mc-accent-text`** (12 rules); fills keep `--mc-accent`. The seed is unchecked
+    against the page — a pale one measured 1.12:1 as link text. (This plugin draws no focus rings of its own;
+    the browser's default outline applies.)
+  - **`refreshIntervalMinutes` declares `min: 1`, `max: 1440`, `step: 1`.** `0` used to save, and the backend's
+    clamp then quietly ran the rollup every minute — thirty times the default load, with the form showing
+    `0`. The host now refuses it on write, naming the bound; the clamp stays for a value stored before the
+    bound existed.
   - **The `social` consent category has a name** (`consent.categoryLabels`): "Sharing buttons" /
     "Teilen-Schaltflächen" with a one-line hint, instead of the bare id between two explained categories.
 - **2.16.0** — SDK **0.15.0**, hosted by core **0.7.2**. One contract minor, and unusually it is a release
