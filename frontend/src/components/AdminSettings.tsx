@@ -102,7 +102,8 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
         .settings { background: var(--mc-surface); color: var(--mc-text); border: 1px solid var(--mc-border);
           border-radius: 0.5rem; padding: 0.75rem 1rem; font-family: system-ui, sans-serif; display: flex;
           flex-direction: column; gap: 0.5rem; }
-        .settings .title { font-size: 0.85rem; font-weight: 600; color: var(--mc-accent-text); margin: 0; }
+        .settings .title { font-size: 0.85rem; font-weight: 600; line-height: inherit; color: var(--mc-accent-text);
+          margin: 0; }
         .settings .hint { font-size: 0.75rem; color: var(--mc-text-muted); margin: 0; }
         /* Fenced off from the editable fields above it, because nothing in here is editable *from this
            panel*: both lists are an admin's decision made elsewhere in the shell. A read-only block
@@ -129,10 +130,11 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
         .settings .error .detail { color: var(--mc-text-muted); }
       `}</style>
 
-      <p className="title">
+      {/* `h2`, like the highlight section above it in the same sidebar: both sit under the panel's `h1`. */}
+      <h2 className="title">
         <Icon name="settings" />
         {i18n.t('settings.title')}
-      </p>
+      </h2>
       <p className="hint">{i18n.t('settings.hint')}</p>
 
       <label>

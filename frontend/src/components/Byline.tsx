@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PluginContext, PluginI18n, UserRef } from '@mosaicast/plugin-sdk';
+import { FallbackImg } from '../images';
 
 /**
  * Who wrote a highlight, resolved from a UUID at render (SDK 0.13.0, `ctx.users`, ARCHITECTURE §8.8).
@@ -66,7 +67,8 @@ export function Byline({
           {/* No lazy loading and no dimensions to guess: the host serves a small square from its own
               origin, so this is one same-origin request that needs no CSP widening and no consent
               category — the picture is the host's, not a third party's. */}
-          <img src={who.avatarUrl} alt="" width={22} height={22} />
+          {/* Decoration beside the name, so a failed load simply goes (#49). */}
+          <FallbackImg src={who.avatarUrl} alt="" width={22} height={22} />
           <span>{i18n.t('byline.by', { name: who.displayName })}</span>
         </>
       ) : (

@@ -15,6 +15,7 @@ import {
 import { marked } from 'marked';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
+import { FallbackImg, hideFailedImages } from '../images';
 import { DETAIL_PREFIX, PAGE_ENTRIES, PAGE_PATTERNS } from '../page-entries';
 import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { HighlightTags } from './HighlightTags';
@@ -347,6 +348,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
 
         .detail { border: 1px solid var(--mc-border); border-radius: 0.75rem; background: var(--mc-surface); padding: 1rem 1.1rem; }
         .detail .image { display: block; max-width: 100%; height: auto; border-radius: 0.5rem; margin-bottom: 0.75rem; }
+        .detail .imageAlt { margin: 0 0 0.75rem; font-style: italic; color: var(--mc-text-muted); font-size: 0.85rem; }
         .detail h2 { margin: 0 0 0.5rem; font-size: 1.15rem; }
         .detail .published { margin: 0 0 0.5rem; font-size: 0.8rem; color: var(--mc-text-muted); }
         .detail .content :where(p) { margin: 0 0 0.5rem; }
@@ -359,6 +361,10 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
         .back { display: inline-flex; align-items: center; gap: 0.3rem; margin-bottom: 0.6rem; color: var(--mc-accent-text); font-size: 0.85rem; }
         .empty { margin: 0; padding: 1.5rem; text-align: center; color: var(--mc-text-muted); font-style: italic;
                  border: 1px dashed var(--mc-border); border-radius: 0.75rem; }
+        .empty.offer { font-style: normal; display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
+        .empty.offer p { margin: 0; }
+        .empty.offer .listen { margin-top: 0; }
+        .empty.offer .pick { color: var(--mc-accent-text); font-size: 0.85rem; }
         .notFound { text-align: center; padding: 2.5rem 1rem; }
         .notFound h1 { margin: 0 0 0.4rem; font-size: 1.3rem; }
         .notFound p { margin: 0 0 1rem; color: var(--mc-text-muted); font-size: 0.9rem; }
@@ -467,7 +473,7 @@ function sortEntries(
   if (sort === 'favourites') {
     return copy.sort((a, b) => b.favourites - a.favourites);
   }
-  const at = (slug: string) => Date.parse(displays[slug]?.publishedAt ?? '') || -Infinity;
+  const at = (slug: string) => Date.parse(displays[slug]?.publishedAt ?? '') || 0;
   return copy.sort((a, b) => at(b.slug) - at(a.slug));
 }
 
@@ -530,7 +536,7 @@ function Contributors({
           <span className="who" key={id}>
             {/* Host-served and always populated (§8.7) — generated from the UUID when there is no provider
                 picture, and proxied rather than redirected so no provider id reaches the page source. */}
-            <img src={who.avatarUrl} alt="" width={21} height={21} />
+            <FallbackImg src={who.avatarUrl} alt="" width={21} height={21} />
             {who.displayName}
             <span className="n">{i18n.plural('page.authors.count', n)}</span>
           </span>
@@ -616,9 +622,63 @@ function FeedMeta({ snapshot, i18n }: { snapshot: DisplaySnapshot | undefined; i
   );
 }
 
+/**
+ * The index with nothing on it yet — an **offer** to whoever can act on it, a description to whoever
+ * cannot (plugin-sample#46).
+ *
+ * Until 2.17.0 everybody read "A podcaster can write the first one from any episode page", including the
+ * podcaster, who was told their own role in the third person and handed no link. Now the check is the
+ * manifest's write floor (`writableBy: "podcaster"`, so podcaster or admin), and above it the empty state
+ * *is* the action: a button to the newest episode's page, where this plugin's `episode/main` tile carries
+ * the editor, and a way to the podcaster-only `unwritten` list to choose another. Below the floor the
+ * sentence stays: a visitor learns the page is new and who fills it, which is all they can do with it.
+ *
+ * "Newest" is by the feed's `publishedAt` from the host's snapshots, because `ctx.episodes` promises no
+ * order; an episode without a date sorts last, and with no dates at all the host's first slug wins.
+ */
+function EmptyIndex({
+  ctx,
+  i18n,
+  displays,
+}: {
+  ctx: PluginContext;
+  i18n: PluginI18n;
+  displays: Record<string, DisplaySnapshot>;
+}) {
+  const canWrite = ctx.user?.role === 'podcaster' || ctx.user?.role === 'admin';
+  if (!canWrite) return <p className="empty">{i18n.t('page.index.empty')}</p>;
+  if (ctx.episodes.length === 0) return <p className="empty">{i18n.t('page.index.noEpisodes')}</p>;
+  const published = (slug: string) => Date.parse(displays[slug]?.publishedAt ?? '') || 0;
+  const newest = [...ctx.episodes].sort((a, b) => published(b) - published(a))[0];
+  return (
+    <div className="empty offer">
+      <p>{i18n.t('page.index.writerEmpty')}</p>
+      {/* Out to core's episode page — a core route, so an `href` from `ctx.links`, never `navigate`. */}
+      <a className="listen" href={ctx.links.episode(newest)}>
+        <Icon name="compose" />
+        {i18n.t('page.index.writeFirst')}
+      </a>
+      {ctx.episodes.length > 1 && (
+        <a className="pick" {...internalLink(ctx.route, 'unwritten')}>
+          {i18n.t('page.index.pickAnother')}
+        </a>
+      )}
+    </div>
+  );
+}
+
+/** The card tile for "no picture" — no artwork at all, or artwork that failed to load. */
+function BlankThumb() {
+  return (
+    <span className="thumb blank" aria-hidden="true">
+      <Icon name="star" />
+    </span>
+  );
+}
+
 /** The root view: every highlighted episode as a card, in the order `?sort=` asked for. */
 function IndexView({ ctx, entries, i18n, title, displays }: ViewProps) {
-  if (entries.length === 0) return <p className="empty">{i18n.t('page.index.empty')}</p>;
+  if (entries.length === 0) return <EmptyIndex ctx={ctx} i18n={i18n} displays={displays} />;
   return (
     <div className="grid">
       {entries.map((entry) => {
@@ -636,12 +696,11 @@ function IndexView({ ctx, entries, i18n, title, displays }: ViewProps) {
             {artwork ? (
               // alt="" on purpose: the card's own title names the episode, so describing the picture again
               // makes a screen reader read the row twice. The image is decoration *here*; the detail view
-              // renders the podcaster's real alt text.
-              <img className="thumb" src={artwork} alt="" loading="lazy" />
+              // renders the podcaster's real alt text. A feed's artwork is a third party's URL, so a failed
+              // one falls back to the same tile as no artwork at all (#49).
+              <FallbackImg className="thumb" src={artwork} alt="" loading="lazy" fallback={<BlankThumb />} />
             ) : (
-              <span className="thumb blank" aria-hidden="true">
-                <Icon name="star" />
-              </span>
+              <BlankThumb />
             )}
             <div className="body">
               <span className="name">{title(entry.slug)}</span>
@@ -710,7 +769,7 @@ function GalleryView({ ctx, entries, i18n, title }: ViewProps) {
     <div className="grid">
       {entries.map((entry) => (
         <a key={entry.slug} className="card" {...internalLink(ctx.route, `${DETAIL_PREFIX}${encodeURIComponent(entry.slug)}`)}>
-          <img className="thumb" src={blobs.urlFor(entry.imageRef!)} alt="" loading="lazy" />
+          <FallbackImg className="thumb" src={blobs.urlFor(entry.imageRef!)} alt="" loading="lazy" fallback={<BlankThumb />} />
           <div className="body">
             <span className="name">{title(entry.slug)}</span>
           </div>
@@ -830,7 +889,14 @@ function DetailView({
       {!loaded ? null : shown?.markdown ? (
         <article className="detail">
           {doc?.image && ctx.blobs && (
-            <img className="image" src={ctx.blobs.urlFor(doc.image.ref)} alt={doc.image.alt} />
+            // Content, not decoration: a failed load leaves the podcaster's alt text as text (#49).
+            <FallbackImg
+              className="image"
+              src={ctx.blobs.urlFor(doc.image.ref)}
+              alt={doc.image.alt}
+              fallback={doc.image.alt && <p className="imageAlt">{doc.image.alt}</p>}
+              onFail={(src) => ctx.log('warn', `highlight image failed to load: ${src}`)}
+            />
           )}
           <h2>{title}</h2>
           {snapshot?.publishedAt && <p className="published">{i18n.date(snapshot.publishedAt)}</p>}
@@ -840,6 +906,7 @@ function DetailView({
           <div
             className="content"
             lang={shown.locale}
+            ref={hideFailedImages}
             dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown, ctx.sanitize) }}
           />
           {/* The same two provenance notes the episode slot shows, and for the same reason: a reader who

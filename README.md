@@ -1068,9 +1068,10 @@ the change is immediate and visible to anonymous visitors too.
 `plugin.json` declares four **services** under `consent.services[]` (not the pre-0.4.0
 `{categories, externalSources}` shape, which 0.4.0 rejects at load): `plausible-highlight-analytics`
 (category `analytics`), `host-badge-cdn` (category `functional`), `share-widget` (category `social`,
-arbitrary/unknown to the host — it passes an undeclared category through verbatim, proving a plugin isn't
-limited to `necessary`/`functional`/`analytics`), and `highlight-plugin-badge` (category `necessary` — see
-below). Each service's `hosts[]` is also the CSP allow-list for that origin — an origin left out stays
+which core has no label for, so the manifest supplies one in `consent.categoryLabels` since SDK 0.16.0,
+proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `highlight-plugin-badge`
+(category `necessary` — see below). All four hosts are placeholders that never resolve; the badges are
+`FallbackImg`s, so a visitor sees the consent flow and never a broken image. Each service's `hosts[]` is also the CSP allow-list for that origin — an origin left out stays
 blocked even after consent is granted, and, since core's storage/CSP-enforcement update, **narrowed per
 visitor**: the server mirrors the decision into an `mc_consent` cookie and only widens the CSP by what that
 cookie actually grants, so a declined category is a blocked request at the network layer, not just a
@@ -1412,6 +1413,20 @@ that output path works unmodified.
     bound existed.
   - **The `social` consent category has a name** (`consent.categoryLabels`): "Sharing buttons" /
     "Teilen-Schaltflächen" with a one-line hint, instead of the bare id between two explained categories.
+  - **The empty page offers the action** ([#46](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/46)).
+    A podcaster or admin gets "Write the first highlight", linking to the newest episode's page (by the
+    feed's date, since `ctx.episodes` promises no order), and a link to the `unwritten` list. A visitor
+    who cannot write still gets the sentence. Both locales.
+  - **A failed image stands down** ([#47](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/47),
+    [#49](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/49)). `images.tsx` has `FallbackImg` and,
+    for the rendered Markdown, `hideFailedImages`. Decoration (avatars, badges, the editor preview) is hidden,
+    card thumbnails get the blank-star tile, and the podcaster's own picture leaves its alt text as text. The
+    consent demo keeps its placeholder hosts, because a consent-gated third-party load is what it
+    demonstrates; they fail quietly now and are logged through `ctx.log`. A one-line intro says what the
+    three consent buttons have in common.
+  - **Section titles are headings** ([#48](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/48)):
+    `h2` for the highlight section and the settings panel, since every placement sits under the shell's `h1`,
+    and `h3` for the browse list. They look the same as before.
 - **2.16.0** — SDK **0.15.0**, hosted by core **0.7.2**. One contract minor, and unusually it is a release
   that fixes bugs this plugin *had* rather than adding a surface it lacked.
   - **[A schedule that follows its config](#two-ways-to-be-configurable--and-why-this-plugin-uses-both)** —

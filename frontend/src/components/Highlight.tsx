@@ -7,6 +7,7 @@ import { matchRoute, type BlobQuota, type PluginContext, type PluginRoute, type 
 import { marked } from 'marked';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
+import { FallbackImg, hideFailedImages } from '../images';
 import { HighlightModal } from './HighlightModal';
 import { ConsentExtras } from './ConsentExtras';
 import { HighlightTags } from './HighlightTags';
@@ -550,8 +551,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           margin-bottom: 0.5rem;
         }
         .title {
+          margin: 0;
           font-size: 0.85rem;
           font-weight: 600;
+          line-height: inherit;
           color: var(--mc-accent-text);
         }
         .content :where(p) { margin: 0 0 0.5rem; }
@@ -640,7 +643,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       )}
 
       <div className="header">
-        <span className="title">{heading}</span>
+        {/* A real heading (plugin-sample#48): every placement this renders in sits under the shell's own
+            `h1` — the site/feed panel title, or the episode title beside "Show notes" (`h2`) — so `h2` is
+            the level, and heading navigation finds the section. Styled exactly as the old `span`. */}
+        <h2 className="title">{heading}</h2>
         {canEdit && (
           <button type="button" ref={editButtonRef} onClick={openEditor}>
             <Icon name="edit" />
@@ -674,7 +680,14 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               which is the whole reason it is stored beside the ref rather than derived from a filename. */}
           {highlight.image &&
             (blobs ? (
-              <img className="image" src={blobs.urlFor(highlight.image.ref)} alt={highlight.image.alt} />
+              // A failed load falls back to the same alt paragraph a refused `blobs` block gets (#49).
+              <FallbackImg
+                className="image"
+                src={blobs.urlFor(highlight.image.ref)}
+                alt={highlight.image.alt}
+                fallback={highlight.image.alt && <p className="imageAlt">{highlight.image.alt}</p>}
+                onFail={(src) => ctx.log('warn', `highlight image failed to load: ${src}`)}
+              />
             ) : (
               highlight.image.alt && <p className="imageAlt">{highlight.image.alt}</p>
             ))}
@@ -686,6 +699,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           <div
             className="content"
             lang={shown.locale}
+            ref={hideFailedImages}
             dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown, ctx.sanitize) }}
           />
           {/* Provenance, shown to the reader and not only to the podcaster. The SDK's rule that machine
@@ -852,7 +866,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
 
       {isSite && !inDeepLink && ctx.episodes.length > 0 && (
         <div className="browse">
-          <p className="browseTitle">{i18n.t('browse.title')}</p>
+          <h3 className="browseTitle">{i18n.t('browse.title')}</h3>
           <ul>
             {ctx.episodes.map((slug) => (
               <li key={slug}>
@@ -1100,7 +1114,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                   )}
                   {draftImage && (
                     <>
-                      <img className="preview" src={blobs.urlFor(draftImage.ref)} alt={draftImage.alt} />
+                      <FallbackImg className="preview" src={blobs.urlFor(draftImage.ref)} alt={draftImage.alt} />
                       <label className="field">
                         {i18n.t('image.alt')}
                         <input

@@ -1239,3 +1239,100 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
     await clickButton(modal, 'Cancel');
   });
 });
+
+/** plugin-sample#48: the section titles are headings, so heading navigation finds them. */
+describe('Highlight — headings', () => {
+  it('titles the section with an h2, the level below every placement’s own h1', async () => {
+    const container = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } }));
+    await flush();
+
+    const title = container.querySelector('.title')!;
+    expect(title.tagName).toBe('H2');
+    expect(title.textContent).toBe('Episode Highlight');
+  });
+
+  it('nests the browse list under it as an h3', async () => {
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'site', id: 'main' },
+        episodes: ['ep-1'],
+        docs: makeMockDocs({ 'data/site/main/highlight': { markdown: 'Welcome' } }),
+      }),
+    );
+    await flush();
+
+    expect(container.querySelector('.browseTitle')!.tagName).toBe('H3');
+  });
+});
+
+/**
+ * plugin-sample#47, #49: an image that fails to load stands down. What it leaves behind depends on what it
+ * was for — decoration goes, content leaves its alt text.
+ */
+describe('Highlight — failed images', () => {
+  const fail = (img: Element) =>
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+
+  it('drops a consent badge whose host does not resolve, and tells the author through ctx.log', async () => {
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } });
+    const container = mount(ctx);
+    await flush();
+    const wordmark = container.querySelector('img.badge')!;
+
+    fail(wordmark);
+
+    expect(container.querySelector('img.badge')).toBeNull();
+    expect(container.textContent).not.toContain('Highlight plugin wordmark');
+    expect(ctx.logs).toContainEqual(
+      expect.objectContaining({ level: 'warn', message: expect.stringContaining('static.example') }),
+    );
+  });
+
+  it('explains what the consent buttons have in common', async () => {
+    const container = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } }));
+    await flush();
+
+    expect(container.querySelector('.extras .intro')!.textContent).toContain('three things from other companies');
+  });
+
+  it('leaves the podcaster’s alt text as text when their picture fails', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+    const stored = await blobs.upload(new File([new Uint8Array(8)], 'cover.png', { type: 'image/png' }));
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'episode', id: 'ep-1' },
+        blobs,
+        docs: makeMockDocs({
+          'data/episode/ep-1/highlight': { markdown: 'The drop', image: { ref: stored.ref, alt: 'A waveform' } },
+        }),
+      }),
+    );
+    await flush();
+
+    fail(container.querySelector('img.image')!);
+
+    expect(container.querySelector('img.image')).toBeNull();
+    expect(container.querySelector('.imageAlt')!.textContent).toBe('A waveform');
+  });
+
+  it('hides a failed image inside the rendered Markdown', async () => {
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'episode', id: 'ep-1' },
+        docs: makeMockDocs({
+          'data/episode/ep-1/highlight': { markdown: 'Look ![a chart](https://blocked.example/chart.png)' },
+        }),
+      }),
+    );
+    await flush();
+    const img = container.querySelector<HTMLImageElement>('.content img')!;
+    expect(img.style.display).toBe('');
+
+    fail(img);
+
+    expect(img.style.display).toBe('none');
+    expect(container.querySelector('.content')!.textContent).toContain('Look');
+  });
+});

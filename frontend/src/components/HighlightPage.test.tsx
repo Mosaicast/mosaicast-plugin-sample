@@ -350,3 +350,70 @@ describe('HighlightPage — who writes the highlights (ctx.users, SDK 0.13.0)', 
     expect(container.querySelector('.contributors')).toBeNull();
   });
 });
+
+/**
+ * plugin-sample#46: an empty index names the action to whoever can take it, and describes it to whoever
+ * cannot. Before 2.17.0 a podcaster was told "a podcaster can write the first one" and handed no link.
+ */
+describe('HighlightPage — the empty index', () => {
+  const empty = () => makeMockDocs({ 'data/site/main/index': { entries: [] } });
+
+  it('describes the page to a visitor who may not write, with no action to click', async () => {
+    const container = mount(pageCtx({ docs: empty() }));
+    await flush();
+
+    expect(container.querySelector('.empty')!.textContent).toContain('A podcaster can write the first one');
+    expect(container.querySelector('.empty a')).toBeNull();
+  });
+
+  it('offers a podcaster the newest episode by the feed’s date, and the list of the rest', async () => {
+    // `ctx.episodes` promises no order: the Kraken is first here, and the Lighthouse is newer.
+    const container = mount(pageCtx({ docs: empty(), user: mockUser('u1', 'podcaster') }));
+    await flush();
+
+    const write = container.querySelector<HTMLAnchorElement>('.empty a.listen')!;
+    expect(write.textContent).toBe('Write the first highlight');
+    expect(write.getAttribute('href')).toBe('/episodes/the-lighthouse');
+    expect(container.querySelector('.empty a.pick')!.getAttribute('href')).toBe('/p/sample/unwritten');
+    expect(container.querySelector('.empty')!.textContent).not.toContain('A podcaster can');
+  });
+
+  it('makes the same offer in German', async () => {
+    const container = mount(pageCtx({ docs: empty(), user: mockUser('u1', 'admin'),
+      locale: localesOf(['en', 'de'], ['en', 'de'], 'de') }));
+    await flush();
+
+    expect(container.querySelector('.empty a.listen')!.textContent).toBe('Das erste Highlight schreiben');
+  });
+
+  it('tells a podcaster on a feed with no episodes what unlocks the offer, rather than a dead link', async () => {
+    const container = mount(pageCtx({ docs: empty(), user: mockUser('u1', 'podcaster'), episodes: [] }));
+    await flush();
+
+    expect(container.querySelector('.empty a')).toBeNull();
+    expect(container.querySelector('.empty')!.textContent).toContain('Once the feed has an episode');
+  });
+});
+
+/** plugin-sample#49: an image that fails to load stands down instead of painting a broken glyph. */
+describe('HighlightPage — failed images', () => {
+  it('swaps a card’s failed artwork for the tile a card without artwork gets', async () => {
+    const ctx = pageCtx({
+      feeds: makeMockFeeds({
+        'the-kraken': snapshot({ imageUrl: 'https://cdn.feed.example/kraken.png' }),
+        'the-lighthouse': snapshot({ title: 'The Lighthouse' }),
+      }),
+    });
+    const container = mount(ctx);
+    await flush();
+    const img = container.querySelector<HTMLImageElement>('img.thumb')!;
+    expect(img).not.toBeNull();
+
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+
+    expect(container.querySelector('img.thumb')).toBeNull();
+    expect(container.querySelectorAll('.thumb.blank')).toHaveLength(2);
+  });
+});
