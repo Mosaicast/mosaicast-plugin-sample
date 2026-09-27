@@ -559,6 +559,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         }
         .content :where(p) { margin: 0 0 0.5rem; }
         .content :where(p:last-child) { margin-bottom: 0; }
+        /* Tables are content since SDK 0.16.1 kept align=; they scroll inside the tile rather than widen it. */
+        .content :where(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.5rem; }
+        .content :where(th, td) { border: 1px solid var(--mc-border); padding: 0.25rem 0.5rem; }
         /* max-width, not width: a podcaster's upload is whatever their camera produced, and the slot it
            lands in is a host region of unknown width. height:auto keeps the aspect ratio the host's own
            reset would otherwise let the width override. */

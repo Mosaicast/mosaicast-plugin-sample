@@ -735,6 +735,17 @@ class SamplePluginTest {
     }
 
     @Test
+    void excerptSaysWhatThePageSaysNotItsMarkup() {
+        // Found against a running core: a table and a stray <style> reached og:description and the search
+        // snippet verbatim. Escaped, so harmless — and still not what the page shows, which ctx.sanitize
+        // renders without the style block and without the table's delimiter row.
+        String markdown = "Forty years.\n\n| Left | Centre |\n|:-----|:------:|\n| a | b |\n\n"
+                + "<style>body{display:none}</style><p style=\"color:red\">styled</p>";
+
+        assertEquals("Forty years. Left Centre a b styled", SamplePlugin.excerpt(markdown));
+    }
+
+    @Test
     void indexOmitsAContentlessHighlightItJustPruned() {
         // The prune and the listing come from the same pass on purpose. Published from a second walk, the
         // page could list an episode whose doc this pass had already removed.

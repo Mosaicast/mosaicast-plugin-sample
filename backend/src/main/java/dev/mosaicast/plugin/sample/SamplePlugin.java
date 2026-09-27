@@ -266,7 +266,20 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     private static final int DESCRIPTION_EXCERPT_LENGTH = 160;
 
     /** Markdown punctuation dropped by {@link #excerpt(String)}; precompiled — {@code urls()} runs per request. */
-    private static final Pattern MARKDOWN_TOKENS = Pattern.compile("[#*_`\\[\\]()]");
+    private static final Pattern MARKDOWN_TOKENS = Pattern.compile("[#*_`|\\[\\]()]");
+
+    /**
+     * A {@code <style>}/{@code <script>} element <em>with its content</em>. Markdown passes raw HTML through,
+     * and {@code ctx.sanitize} drops both on the page — so their text is not part of what a reader sees and
+     * must not become the share preview or the search snippet either.
+     */
+    private static final Pattern HTML_NON_TEXT = Pattern.compile("(?is)<(style|script)\\b.*?</\\1\\s*>");
+
+    /** Any other HTML tag; its text content stays, as it does on the rendered page. */
+    private static final Pattern HTML_TAG = Pattern.compile("<[^>]*>");
+
+    /** A GFM table's delimiter row ({@code |:---|:---:|}), which renders as nothing and reads as noise. */
+    private static final Pattern TABLE_RULE = Pattern.compile("(?m)^[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*$");
 
     /** Collapses newlines/indentation into single spaces for a one-line OG description. */
     private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
@@ -1685,9 +1698,16 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         return marks.isEmpty() ? Optional.empty() : Optional.of(Map.of("favouritedHighlights", List.copyOf(marks)));
     }
 
-    /** Strips the most common markdown tokens and collapses whitespace, for a plain-text OG description. */
-    private static String excerpt(String markdown) {
-        String plain = WHITESPACE_RUN.matcher(MARKDOWN_TOKENS.matcher(markdown).replaceAll("")).replaceAll(" ").trim();
+    /**
+     * Plain text for an OG description, a search snippet and the page listing: raw HTML and table rules out,
+     * the most common markdown tokens stripped, whitespace collapsed. Approximately what the rendered page
+     * says — the page itself goes through {@code ctx.sanitize}, this never renders as HTML anywhere.
+     */
+    static String excerpt(String markdown) {
+        String text = HTML_NON_TEXT.matcher(markdown).replaceAll(" ");
+        text = HTML_TAG.matcher(text).replaceAll(" ");
+        text = TABLE_RULE.matcher(text).replaceAll("");
+        String plain = WHITESPACE_RUN.matcher(MARKDOWN_TOKENS.matcher(text).replaceAll("")).replaceAll(" ").trim();
         return plain.length() <= DESCRIPTION_EXCERPT_LENGTH ? plain : plain.substring(0, DESCRIPTION_EXCERPT_LENGTH).trim() + "…";
     }
 }

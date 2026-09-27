@@ -353,6 +353,9 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
         .detail .published { margin: 0 0 0.5rem; font-size: 0.8rem; color: var(--mc-text-muted); }
         .detail .content :where(p) { margin: 0 0 0.5rem; }
         .detail .content :where(p:last-child) { margin-bottom: 0; }
+        /* Tables are content since SDK 0.16.1 kept align=; they scroll inside the tile rather than widen it. */
+        .detail .content :where(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.5rem; }
+        .detail .content :where(th, td) { border: 1px solid var(--mc-border); padding: 0.25rem 0.5rem; }
         .listen {
           display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.75rem;
           background: var(--mc-accent); color: var(--mc-accent-contrast);

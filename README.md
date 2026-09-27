@@ -672,7 +672,8 @@ have to be the same fact**; getting one right and not the other is worse than de
 the same lesson `OgMeta.locale` taught above, from the other end.
 
 ### Verified against a running core
-`dev/instance.sh up --plugins` in the core checkout, one highlight translated into German and one not:
+`dev/instance.sh up --plugins` in the core checkout (today: `--name sample up --plugin-dir …/dist`, see
+[Your first plugin](#your-first-plugin-in-5-minutes)), one highlight translated into German and one not:
 
 | Checked | Result |
 |---|---|
@@ -1285,6 +1286,16 @@ export MOSAICAST_PLUGINS_DIR=/path/to/core/plugins
 ./install.sh                        # copies dist/ to $MOSAICAST_PLUGINS_DIR/sample
 # restart mosaicast-core — the plugin loads and its slots render
 ```
+**No core of your own to restart?** With a `mosaicast-core` checkout next to this one, a disposable, seeded
+site that loads exactly your build — and cannot collide with anyone else's on the same machine (core 0.7.5):
+
+```bash
+../mosaicast-core/dev/instance.sh --name my-plugin up --plugin-dir "$PWD/dist"   # own DB, ports, plugins dir
+source <(../mosaicast-core/dev/instance.sh --name my-plugin env)                # $MC_APP_URL, never a fixed port
+../mosaicast-core/dev/instance.sh --name my-plugin down                         # only ever your own name
+```
+Repeat `--plugin-dir` to load a second plugin beside yours. `up` starts from a fresh database each time.
+
 From here, rename `id`/`name` in `plugin.json`, the Java package under `backend/src/main/java/...`, and the
 custom element tags in `frontend/src/sample-element.tsx`, and replace the highlight-note logic with your
 own.
@@ -1399,7 +1410,14 @@ that output path works unmodified.
   - **SDK 0.16.1** widens that policy by `start` and `align`, so a numbered list that resumes after a paragraph
     keeps its numbers and a table keeps its column alignment; `Highlight.test.tsx` pins both. The test kit's
     `sanitizeLikeHost` now matches core element by element. The host applies whichever lists *it* was built
-    with: on core 0.7.4 a resumed list still renumbers from 1 until the next core release, which pins 0.16.1.
+    with: on core 0.7.4 a resumed list still renumbers from 1; **core 0.7.5 pins 0.16.1**, and a live 0.7.5
+    instance keeps `<ol start="3">` and every `align`. Tables get a border and scroll inside the tile rather
+    than widening it, now that they render as the author meant.
+  - **Excerpts say what the page says.** The plain-text excerpt behind `og:description`, the search snippet
+    and the page's card list passed raw HTML and table rules through as text — a `<style>` block the page
+    itself drops (via `ctx.sanitize`) showed up in the share preview as `<style>body{…}`, and a table as
+    `|:-----|:------:|`. Found on a running core, not by a unit test; `excerpt` now drops `<style>`/`<script>`
+    with their content, other tags, table delimiter rows and pipes.
   - **`data.readsAllUsers: true`**, and the favourite tally reads through `ctx.allUsers()`.
     `DocStore.queryAcrossUsers` no longer exists: reading every visitor's partition is now declared, so an
     operator sees before installing that this plugin tallies its visitors' favourites. `everyonesFavourites`
