@@ -5,9 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { matchRoute, type BlobQuota, type PluginContext, type PluginRoute, type Scope } from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
+import { FallbackImg, hideFailedImages } from '../images';
 import { HighlightModal } from './HighlightModal';
 import { ConsentExtras } from './ConsentExtras';
 import { HighlightTags } from './HighlightTags';
@@ -88,9 +88,15 @@ function internalLink(route: PluginRoute, subpath: string) {
   };
 }
 
-/** Renders markdown to sanitized HTML — never trust a podcaster-authored string verbatim (ARCHITECTURE §12.6). */
-function renderMarkdown(markdown: string): string {
-  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
+/**
+ * Renders markdown to HTML safe for `innerHTML` — never trust a podcaster-authored string verbatim
+ * (ARCHITECTURE §12.6). Sanitized by `ctx.sanitize` (SDK 0.16.0), the host's own feed-HTML policy, and **after** rendering,
+ * since Markdown can emit raw HTML. Until 2.17.0 this ran DOMPurify with its defaults, which let `<style>`
+ * and `style=` through — a full-viewport overlay or attribute-selector CSS under the contract's
+ * `style-src 'unsafe-inline'`.
+ */
+function renderMarkdown(markdown: string, sanitize: PluginContext['sanitize']): string {
+  return sanitize(marked.parse(markdown, { async: false }) as string);
 }
 
 /**
@@ -545,12 +551,17 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           margin-bottom: 0.5rem;
         }
         .title {
+          margin: 0;
           font-size: 0.85rem;
           font-weight: 600;
-          color: var(--mc-accent);
+          line-height: inherit;
+          color: var(--mc-accent-text);
         }
         .content :where(p) { margin: 0 0 0.5rem; }
         .content :where(p:last-child) { margin-bottom: 0; }
+        /* Tables are content since SDK 0.16.1 kept align=; they scroll inside the tile rather than widen it. */
+        .content :where(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.5rem; }
+        .content :where(th, td) { border: 1px solid var(--mc-border); padding: 0.25rem 0.5rem; }
         /* max-width, not width: a podcaster's upload is whatever their camera produced, and the slot it
            lands in is a host region of unknown width. height:auto keeps the aspect ratio the host's own
            reset would otherwise let the width override. */
@@ -574,7 +585,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           gap: 0.3rem;
         }
         .listen { margin: 0.5rem 0 0; font-size: 0.85rem; }
-        .listen a { color: var(--mc-accent); }
+        .listen a { color: var(--mc-accent-text); }
         .empty {
           margin: 0;
           color: var(--mc-text-muted);
@@ -603,10 +614,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         .browse { margin-top: 0.75rem; }
         .browse .browseTitle { margin: 0 0 0.25rem; font-size: 0.8rem; font-weight: 600; color: var(--mc-text); }
         .browse ul { margin: 0; padding-left: 1.1rem; }
-        .browse a, .back { color: var(--mc-accent); }
+        .browse a, .back { color: var(--mc-accent-text); }
         .browse .episodeLink { margin-left: 0.4rem; font-size: 0.75rem; color: var(--mc-text-muted); }
         .back { display: inline-block; margin-bottom: 0.5rem; font-size: 0.8rem; }
-        .filterNote a { color: var(--mc-accent); }
+        .filterNote a { color: var(--mc-accent-text); }
         button {
           background: var(--mc-accent);
           color: var(--mc-accent-contrast);
@@ -635,7 +646,10 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
       )}
 
       <div className="header">
-        <span className="title">{heading}</span>
+        {/* A real heading (plugin-sample#48): every placement this renders in sits under the shell's own
+            `h1` — the site/feed panel title, or the episode title beside "Show notes" (`h2`) — so `h2` is
+            the level, and heading navigation finds the section. Styled exactly as the old `span`. */}
+        <h2 className="title">{heading}</h2>
         {canEdit && (
           <button type="button" ref={editButtonRef} onClick={openEditor}>
             <Icon name="edit" />
@@ -669,7 +683,14 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
               which is the whole reason it is stored beside the ref rather than derived from a filename. */}
           {highlight.image &&
             (blobs ? (
-              <img className="image" src={blobs.urlFor(highlight.image.ref)} alt={highlight.image.alt} />
+              // A failed load falls back to the same alt paragraph a refused `blobs` block gets (#49).
+              <FallbackImg
+                className="image"
+                src={blobs.urlFor(highlight.image.ref)}
+                alt={highlight.image.alt}
+                fallback={highlight.image.alt && <p className="imageAlt">{highlight.image.alt}</p>}
+                onFail={(src) => ctx.log('warn', `highlight image failed to load: ${src}`)}
+              />
             ) : (
               highlight.image.alt && <p className="imageAlt">{highlight.image.alt}</p>
             ))}
@@ -681,7 +702,8 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
           <div
             className="content"
             lang={shown.locale}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown) }}
+            ref={hideFailedImages}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(shown.markdown, ctx.sanitize) }}
           />
           {/* Provenance, shown to the reader and not only to the podcaster. The SDK's rule that machine
               output is a draft is about not passing it off as an original: a paragraph an engine wrote is
@@ -847,7 +869,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
 
       {isSite && !inDeepLink && ctx.episodes.length > 0 && (
         <div className="browse">
-          <p className="browseTitle">{i18n.t('browse.title')}</p>
+          <h3 className="browseTitle">{i18n.t('browse.title')}</h3>
           <ul>
             {ctx.episodes.map((slug) => (
               <li key={slug}>
@@ -1095,7 +1117,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
                   )}
                   {draftImage && (
                     <>
-                      <img className="preview" src={blobs.urlFor(draftImage.ref)} alt={draftImage.alt} />
+                      <FallbackImg className="preview" src={blobs.urlFor(draftImage.ref)} alt={draftImage.alt} />
                       <label className="field">
                         {i18n.t('image.alt')}
                         <input
