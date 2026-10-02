@@ -4,7 +4,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { MouseEvent } from 'react';
 import {
-  DISPLAY_BATCH_LIMIT,
   matchRoute,
   resolveArtwork,
   type DisplaySnapshot,
@@ -16,6 +15,7 @@ import { marked } from 'marked';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
 import { FallbackImg, hideFailedImages } from '../images';
+import { displayAll } from '../shell-filter';
 import { DETAIL_PREFIX, PAGE_ENTRIES, PAGE_PATTERNS } from '../page-entries';
 import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { HighlightTags } from './HighlightTags';
@@ -100,8 +100,9 @@ function internalLink(route: PluginRoute, subpath: string) {
  *   that is the feature: a podcaster's title edit propagates. Storing a copy re-creates the staleness this
  *   surface exists to remove.
  *
- * Beyond {@link DISPLAY_BATCH_LIMIT} slugs the host clamps rather than failing, so the extras are simply
- * absent — which is again indistinguishable from "filtered out", and again handled by skipping.
+ * Beyond `DISPLAY_BATCH_LIMIT` slugs the host clamps rather than failing, and since core 0.7.6
+ * `ctx.episodes` can be longer than that — so {@link displayAll} asks in batches. Before, the tail of a long
+ * show was absent here, indistinguishable from "filtered out".
  */
 function useEpisodeDisplays(ctx: PluginContext, slugs: string[]): Record<string, DisplaySnapshot> {
   const [displays, setDisplays] = useState<Record<string, DisplaySnapshot>>({});
@@ -110,8 +111,7 @@ function useEpisodeDisplays(ctx: PluginContext, slugs: string[]): Record<string,
   useEffect(() => {
     const wanted = key ? key.split(',') : [];
     if (wanted.length === 0) return;
-    ctx.feeds
-      .displayMany(wanted.slice(0, DISPLAY_BATCH_LIMIT))
+    displayAll(ctx, wanted)
       .then(setDisplays)
       .catch(() => {
         // Cards degrade to their slugs rather than disappearing: the highlight is this plugin's content and
@@ -608,16 +608,36 @@ type ViewProps = {
   displays: Record<string, DisplaySnapshot>;
 };
 
-/** The feed's own date and runtime for an episode, or nothing when the host gave no snapshot. */
+/**
+ * "S1 · E6", "S1" or "E6" from {@link DisplaySnapshot.season}/{@link DisplaySnapshot.episodeNo}, or `''`.
+ * Never parsed out of `ctx.episodeLabels`, which is a display string and drops an unnumbered episode's season.
+ */
+export function episodePosition(snapshot: DisplaySnapshot, i18n: PluginI18n): string {
+  const { season, episodeNo } = snapshot;
+  if (season != null && episodeNo != null) {
+    return i18n.t('position.seasonEpisode', { season: i18n.n(season), episode: i18n.n(episodeNo) });
+  }
+  if (season != null) return i18n.t('position.season', { season: i18n.n(season) });
+  if (episodeNo != null) return i18n.t('position.episode', { episode: i18n.n(episodeNo) });
+  return '';
+}
+
+/** The episode's position, the feed's date and runtime, or nothing when the host gave no snapshot. */
 function FeedMeta({ snapshot, i18n }: { snapshot: DisplaySnapshot | undefined; i18n: PluginI18n }) {
   if (!snapshot) return null;
   const published = snapshot.publishedAt ? i18n.date(snapshot.publishedAt) : '';
   // `duration` is an ISO-8601 duration string in the contract, and i18n.duration takes one directly —
   // the parse this plugin would otherwise be hand-rolling for `PT1H2M3S`.
   const runtime = snapshot.duration ? i18n.duration(snapshot.duration) : '';
-  if (!published && !runtime) return null;
+  // The episode's place in its feed (SDK 0.17.0) — identity, not presentation, so unlike the two fields
+  // around it this one is authoritative. Each half is absent when the episode has none: a bonus episode
+  // gets neither, and an unnumbered prologue still has its season.
+  const position = episodePosition(snapshot, i18n);
+  if (!published && !runtime && !position) return null;
   return (
     <p className="feedMeta">
+      {position && <span className="position">{position}</span>}
+      {position && (published || runtime) && <span className="dot">·</span>}
       {published && <span>{published}</span>}
       {published && runtime && <span className="dot">·</span>}
       {runtime && <span>{runtime}</span>}

@@ -719,6 +719,25 @@ describe('Highlight — ctx.filter (read-only season note)', () => {
     expect(container.textContent).toContain('Filtered to season 3');
   });
 
+  it('narrows the site-scope episode list to the filtered season, which ctx.episodes does not (core 0.7.6)', async () => {
+    const ctx = makeMockCtx({
+      scope: { type: 'site', id: 'main' },
+      episodes: ['s1-pilot', 's2-return'],
+      episodeLabels: { 's1-pilot': 'S01E01 · Pilot', 's2-return': 'S02E01 · Return' },
+      feeds: makeMockFeeds({
+        's1-pilot': { title: 'Pilot', description: '', season: 1 },
+        's2-return': { title: 'Return', description: '', season: 2 },
+      }),
+      filter: { current: () => ({ season: 2 }), onChange: () => () => {} },
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const rows = [...container.querySelectorAll('.browse li')].map((li) => li.textContent);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain('Return');
+  });
+
   it('shows no season note when the host filter has none selected', async () => {
     const container = mount(makeMockCtx({ scope: { type: 'feed', id: 'news' } }));
     await flush();

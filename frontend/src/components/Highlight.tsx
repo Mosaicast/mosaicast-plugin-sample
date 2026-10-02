@@ -15,6 +15,7 @@ import { Byline, useAuthors } from './Byline';
 import { TranslationEditor } from './TranslationEditor';
 import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { describeApiError } from '../api-error';
+import { isFiltered, useShellFilteredEpisodes } from '../shell-filter';
 import {
   FAVOURITE_COUNT_KEY,
   HIGHLIGHT_KEY,
@@ -177,6 +178,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   const [, forceFilterRerender] = useState(0);
   useEffect(() => ctx.filter.onChange(() => forceFilterRerender((n) => n + 1)), [ctx]);
   const season = ctx.filter.current().season;
+  // ...and live since core 0.7.6: the site tile's episode list follows the same season/tag/order the shell's
+  // own list does, which the host leaves to us — `ctx.episodes` is the whole scope whatever is filtered.
+  const browse = useShellFilteredEpisodes(ctx, isSite && !inDeepLink);
 
   // The site-wide look this plugin's own admin settings panel controls (see AdminSettings.tsx) — read
   // here so every scope (and the deep-link view) reflects it, since core has no generic config-admin UI
@@ -867,11 +871,15 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         </p>
       )}
 
-      {isSite && !inDeepLink && ctx.episodes.length > 0 && (
+      {isSite && !inDeepLink && browse.state !== 'loading' && (browse.slugs.length > 0 || isFiltered(ctx.filter.current())) && (
         <div className="browse">
           <h3 className="browseTitle">{i18n.t('browse.title')}</h3>
+          {/* Honest about a filter it could not apply: the list below is then the whole site while the page
+              around it is filtered, and silently showing it under a "filtered" note would be a lie. */}
+          {browse.state === 'unfiltered' && <p className="filterNote">{i18n.t('browse.unfiltered')}</p>}
+          {browse.slugs.length === 0 && <p className="filterNote">{i18n.t('browse.noneInFilter')}</p>}
           <ul>
-            {ctx.episodes.map((slug) => (
+            {browse.slugs.map((slug) => (
               <li key={slug}>
                 <a {...internalLink(ctx.route, `${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`)}>
                   {ctx.episodeLabels?.[slug] ?? slug}

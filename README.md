@@ -82,7 +82,7 @@ gotcha](#a-pf4j-gotcha-that-core-fixed--and-the-workaround-this-plugin-carried-f
 | `feeds` | New in 0.9.0 — one batched `displayMany` per page render gives every card the host's real title, artwork, publication date and runtime. Before it, the page drew slugs. A missing key is **normal** (the host filtered that episode out for this visitor), never an error — see [below](#the-page-draws-real-episode-cards-now-sdk-090). |
 | `tags` | New in 0.9.0 — the site's shared vocabulary, `null` unless the manifest declares a `tags` block. The backend mirrors each episode's tags onto this plugin's own subject; `HighlightTags.tsx` renders them and links each to core's filtered feed view. This plugin declares `readsVocabulary` and **not** `writesEpisodes` — see [below](#tags-are-one-vocabulary-several-writers-share-sdk-090). |
 | `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
-| `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
+| `filter` | Live since core 0.7.6 (it was `{}` before). A read-only "Filtered to season N" note at feed/site scope, and the site tile's episode list **follows** the shell's season, tag and order — the host hands over the visitor's choice but `ctx.episodes` stays the whole scope, so the narrowing is the plugin's (`shell-filter.ts`, season from `DisplaySnapshot.season`). Never defines a filter axis itself (§6.1). |
 | `player` | An optional per-highlight "key moment" (seconds): a "Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
 | `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). Both links *into* that subtree — the browse index's per-episode entries and the back-link out of a deep link — keep their `href` **and** hand a plain left-click to `ctx.route.navigate` (0.7.0), which is SPA navigation rather than a full document load: see [below](#internal-links-go-through-ctxroutenavigate-sdk-070). |
 | `locale` | `createPluginI18n` + `locales/{en,de}.json`, reacting to `ctx.locale.onChange`; the translator instance is memoized and its `dispose()` called on cleanup (a leak `createPluginI18n`'s own docs flag as worth fixing once `onChange` returns something to unsubscribe with). **Since 2.13.0 it also decides which language the highlight itself is shown in** — `current()` picks the stored translation, and `content()`/`available()` are the two lists that drive the editor's tabs and the admin panel's read-out. The two jobs are independent: a site can author content in a language this plugin ships no UI catalog for, so the tile can be German prose in English chrome. See [below](#two-locale-lists-and-picking-the-wrong-one-is-silent-sdk-0100). |
@@ -846,7 +846,13 @@ Three properties the code depends on:
   refetch. That is the feature: a podcaster's title edit propagates.
 
 `displayMany` clamps at `DISPLAY_BATCH_LIMIT` (200) rather than failing, so the extras are simply absent —
-which is again indistinguishable from "filtered out", and again handled by skipping.
+indistinguishable from "filtered out". Since core 0.7.6 `ctx.episodes` is the whole scope rather than its
+first 200, so `shell-filter.ts`'s `displayAll` asks in batches of the limit.
+
+**Where an episode sits is authoritative (SDK 0.17.0).** `feed`, `season` and `episodeNo` on a snapshot come
+from the identity layer, not the feed's presentation, so the cards say "S2 · E14" from them — and the site
+tile narrows to a filtered season by them. Never parse `ctx.episodeLabels` for a season: it is a display
+string, and it drops the season of an unnumbered episode.
 
 ## `ctx.docs`, and the escape hatch underneath it
 Every doc access before 0.9.0 was string concatenation against a four-segment path, with the plugin
@@ -1396,6 +1402,19 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.18.0** — SDK **0.17.0**, hosted by core **0.7.6**. A rebuild the host demands — core 0.7.6 rejects every
+  0.16 plugin, since `DisplaySnapshot` grew record components a 0.16 host cannot hand over — plus what the
+  new contract and host make possible.
+  - **The site tile's episode list follows the shell's filter.** `ctx.filter` was `{}` on every core before
+    0.7.6, so the "Filtered to season N" note never showed and nothing followed the visitor's choice. Now
+    `?season=`, `?tag=` and `?order=oldest` narrow and order the list beside the shell's own, season from
+    `DisplaySnapshot.season`, tags through `ctx.tags.episodesWith`. Nothing is fetched while the view is
+    unfiltered, and a filter it cannot apply says so above an unfiltered list rather than passing it off.
+  - **Cards say where an episode sits** ("S2 · E14", "Season 2" for an unnumbered one), from the snapshot's
+    identity fields rather than from `ctx.episodeLabels`.
+  - **Snapshots are fetched in batches.** `ctx.episodes` is no longer cut at 200 (core#248), and a single
+    `displayMany` clamps there, so the page's cards for a long show's oldest episodes fell back to slugs.
+  - PF4J **3.16.0**, the version core loads plugins with (SDK 0.16.2).
 - **2.17.0** — SDK **0.16.1**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
   and this plugin had two of the things they found.
   - **Security: highlight Markdown goes through `ctx.sanitize`.** Both render paths ran
