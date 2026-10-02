@@ -106,6 +106,20 @@ describe('HighlightPage — ctx.feeds', () => {
     expect(container.textContent).toContain('the-lighthouse'); // degrades to the slug, still listed
     expect(ctx.logs.filter((l) => l.level === 'error')).toEqual([]);
   });
+
+  it('places each card in its season from the snapshot (SDK 0.17.0), and leaves a bonus episode unplaced', async () => {
+    const ctx = pageCtx({
+      feeds: makeMockFeeds({
+        'the-kraken': snapshot({ season: 2, episodeNo: 14 }),
+        'the-lighthouse': snapshot({ title: 'The Lighthouse', season: 2 }),
+      }),
+    });
+    const container = mount(ctx);
+    await flush();
+
+    const positions = [...container.querySelectorAll('.feedMeta .position')].map((p) => p.textContent);
+    expect(positions.sort()).toEqual(['S2 · E14', 'Season 2']);
+  });
 });
 
 /**
