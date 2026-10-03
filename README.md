@@ -74,7 +74,7 @@ gotcha](#a-pf4j-gotcha-that-core-fixed--and-the-workaround-this-plugin-carried-f
 |---|---|
 | `scope` | Addresses the doc store (`data/{scopeType}/{scopeId}/highlight`) and picks the i18n title. |
 | `episodes` / `episodeLabels` | Site scope renders a "browse highlighted episodes" index, linking each episode's public slug to its own deep link. |
-| `episode?.status` | An "Upcoming episode — no spoilers yet" badge while `PLANNED`. |
+| `episode?.phase` | New in 0.18.0, and the one to branch on — `status` cannot tell a quiet plan from an announced one. `planned`: a note to the podcaster preparing it that the highlight goes public with the episode (the shell itself says who can see it and until when). `upcoming`: everyone's "Upcoming episode — no spoilers yet". The spoiler gate stays off before release (no audio to have heard). See [quiet planned episodes](#quiet-planned-episodes-sdk-0180). |
 | `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). Also decides whether the favourite toggle is offered at all: an anonymous visitor has no `user` partition, so the component shows a sign-in hint instead of making a request the host would answer with 401. |
 | **the `user` storage scope** | New in 2.6.0 — a signed-in visitor's own "Favourited" mark at `data/user/me/fav:<episodeSlug>`, written with `ctx.api.put`/withdrawn with `ctx.api.delete`. `user` is a `DataScopeType`, **not** a slot scope: `ctx.scope` stays `episode`, only the storage address changes. The public tally beside it comes from a *different*, backend-written doc — see [below](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050). |
 | `api` | The raw client, kept **deliberately** at exactly one call site since 2.12.0: `AdminSettings.tsx` reads and writes the site settings doc through it (with `getOrNull`), so the reference plugin shows the surface underneath `ctx.docs` rather than only the sugar. It is the documented escape hatch and it did not go away — see [below](#ctxdocs-and-the-escape-hatch-underneath-it). |
@@ -854,6 +854,38 @@ from the identity layer, not the feed's presentation, so the cards say "S2 · E1
 tile narrows to a filtered season by them. Never parse `ctx.episodeLabels` for a season: it is a display
 string, and it drops the season of an unnumbered episode.
 
+## Quiet planned episodes (SDK 0.18.0)
+Core 0.7.7 lets a podcaster plan an episode before its feed item exists, and keep it **quiet**: only
+podcasters and admins see it until it is announced (`announceAt`, or *Announce now*). The site hides it
+everywhere. **A plugin backend does not**: `FeedAccess.episodesIn` hands it over, phase included, because a
+planned episode is exactly when content gets prepared for it.
+
+So everything this backend publishes from that list had to learn to leave a quiet episode out: the
+`index` doc, `stats`, sitemap entries, OpenGraph cards, `hasRoute` answers and search hits. One predicate does
+it:
+
+```java
+static boolean isQuiet(PluginContext ctx, String slug) {
+    return ctx.feeds().display(slug).phase() == EpisodePhase.PLANNED;   // fails closed if display() throws
+}
+```
+
+Three things worth copying:
+
+- **Branch on the phase, never the status.** A stored `PLANNED` is either quiet or announced (`UPCOMING`,
+  which is public), and only the phase says which.
+- **Ask per request.** The phase is derived from the clock and moves with nothing written: an announcement
+  passing makes it `UPCOMING`, and a podcaster moving `announceAt` later makes it quiet again. The sitemap,
+  OG, `hasRoute` and search check it on every call. What is published on the schedule (`index`, `stats`) can
+  lag by one interval. The page hides such an entry anyway, since the host's snapshot batch answers without
+  it. The raw doc does not, and nothing tells the plugin to recompute (SDK#98).
+- **The release hook is a shortcut.** `onEpisodeReleased` recomputes so a prepared highlight is listed when
+  the feed item binds, but the event is best effort, so the schedule still reconciles. Both may handle one
+  release, so the recompute is serialised.
+
+Verified on a named core 0.7.7 instance: quiet → seven anonymous surfaces silent; announced → sitemap, page,
+OG and episode doc live at once; pushed back → silent again at once; feed item bound → hook fired, listed.
+
 ## `ctx.docs`, and the escape hatch underneath it
 Every doc access before 0.9.0 was string concatenation against a four-segment path, with the plugin
 responsible for `encodeURIComponent`, for the key pattern, for knowing that `site` is always `main` and
@@ -1402,6 +1434,24 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.19.0** — SDK **0.18.0**, hosted by core **0.7.7**. Core 0.7.7 lets a podcaster plan an episode
+  **quietly** — visible to podcasters and admins only until it is announced — and rejects every 0.17 plugin.
+  - **Nothing public names a quiet episode.** A backend sees planned episodes (that is when content is
+    prepared), so everything this one derives from `episodesIn` was about to publish them: the `index` doc,
+    `stats`, the sitemap, OpenGraph, `hasRoute` and search. `isQuiet(slug)` (phase `PLANNED`) gates all of
+    them. The per-request ones ask per request, because the phase moves with nothing written. Drafting and the
+    image sweep still see the episode, since preparing is the point. Verified live, in both directions.
+  - **`onEpisodeReleased`** recomputes at once, so a highlight prepared for a planned episode is listed the
+    moment the feed item binds, not up to an interval later. The schedule remains the guarantee (the hook is
+    best effort by contract), and recomputes are now serialised so the hook cannot double-announce.
+  - **Translations written while preparing are not announced** on release: the first public pass seeds them.
+  - **The page drops cards the host answered without** (withdrawn, gated, or gone quiet since the last pass)
+    instead of falling back to the slug and excerpt. A failed snapshot call still degrades to slugs.
+  - **Phase-aware episode tile**, and a "Not announced" chip in the podcaster's to-write list (core#258: core
+    0.7.7 does not put quiet episodes in a podcaster's `ctx.episodes` yet, so the chip waits on that).
+  - **Known gap** (SDK#98): an *announced* episode pushed back to quiet keeps its entry in the public
+    `index`/`stats` docs until the next recompute. Nothing signals that transition. Every per-request surface
+    and the rendered page hide it at once.
 - **2.18.0** — SDK **0.17.0**, hosted by core **0.7.6**. A rebuild the host demands — core 0.7.6 rejects every
   0.16 plugin, since `DisplaySnapshot` grew record components a 0.16 host cannot hand over — plus what the
   new contract and host make possible.

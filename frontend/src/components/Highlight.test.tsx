@@ -4,7 +4,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { makeMockCtx, makeMockConsent, makeMockBlobs, makeMockDocs, makeMockFeeds, makeMockTags } from '@mosaicast/plugin-sdk/testing';
+import {
+  makeMockCtx,
+  makeMockConsent,
+  makeMockBlobs,
+  makeMockDocs,
+  makeMockEpisode,
+  makeMockFeeds,
+  makeMockTags,
+} from '@mosaicast/plugin-sdk/testing';
 import type { MockBlobClient, MockDocClient } from '@mosaicast/plugin-sdk/testing';
 import type { PluginContext } from '@mosaicast/plugin-sdk';
 import { docsFailing, docsRecording, flush, hostError, mockUser } from '../test-utils';
@@ -840,27 +848,32 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
   });
 });
 
-describe('Highlight — ctx.episode.status (PLANNED badge)', () => {
-  it('shows the upcoming-episode badge for a PLANNED episode', async () => {
-    const ctx = makeMockCtx({
-      scope: { type: 'episode', id: 'ep-planned' },
-      episode: { status: 'PLANNED' },
-    });
-    const container = mount(ctx);
+describe('Highlight — ctx.episode.phase (SDK 0.18.0)', () => {
+  const at = (phase: Parameters<typeof makeMockEpisode>[0], announceAt?: string) =>
+    makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, episode: makeMockEpisode(phase, announceAt) });
+
+  it('tells the podcaster preparing a quiet episode what happens to the highlight — the shell says the rest', async () => {
+    const container = mount(at('planned', '2026-12-24T18:00:00Z'));
+    await flush();
+
+    expect(container.textContent).toContain('goes public together with the episode');
+    expect(container.textContent).not.toContain('Upcoming episode');
+  });
+
+  it('shows everyone the upcoming badge once it is announced — a status of PLANNED alone cannot say which', async () => {
+    const container = mount(at('upcoming', '2026-10-01T18:00:00Z'));
     await flush();
 
     expect(container.textContent).toContain('Upcoming episode');
+    expect(container.textContent).not.toContain('Prepared quietly');
   });
 
-  it('shows no badge for a PUBLISHED episode', async () => {
-    const ctx = makeMockCtx({
-      scope: { type: 'episode', id: 'ep-1' },
-      episode: { status: 'PUBLISHED' },
-    });
-    const container = mount(ctx);
+  it('shows neither for a released episode', async () => {
+    const container = mount(at('released'));
     await flush();
 
     expect(container.textContent).not.toContain('Upcoming episode');
+    expect(container.textContent).not.toContain('Prepared quietly');
   });
 });
 

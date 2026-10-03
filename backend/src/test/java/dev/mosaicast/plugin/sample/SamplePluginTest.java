@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
+import dev.mosaicast.plugin.api.EpisodePhase;
 import dev.mosaicast.plugin.api.OgMeta;
 import dev.mosaicast.plugin.api.Role;
 import dev.mosaicast.plugin.api.Scope;
@@ -68,8 +69,23 @@ class SamplePluginTest {
      */
     private final SamplePlugin plugin = new SamplePlugin();
 
-    private static FakePluginContext contextWithEpisodes(MapPluginConfig config, String... episodeIds) {
+    /**
+     * The site's episodes, every one **released** — what a fixture meant before SDK 0.18.0 gave episodes a
+     * phase. A slug with no snapshot is treated as quiet ({@code isQuiet} fails closed when the host cannot
+     * say), so a bare {@code FakeFeedAccess} would now hide every highlight; tests about quiet episodes move
+     * one with {@link FakeFeedAccess#withPhase(String, EpisodePhase)}.
+     */
+    private static FakeFeedAccess released(String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        for (String id : episodeIds) {
+            feeds.withDisplay(id, new DisplaySnapshot(id, null, null, null, null, null, null, null, null, ""))
+                    .withPhase(id, EpisodePhase.RELEASED);
+        }
+        return feeds;
+    }
+
+    private static FakePluginContext contextWithEpisodes(MapPluginConfig config, String... episodeIds) {
+        FakeFeedAccess feeds = released(episodeIds);
         return new FakePluginContext(new InMemoryDocStore(), config, feeds, null).withReadsAllUsers();
     }
 
@@ -80,7 +96,7 @@ class SamplePluginTest {
      * or drifted entry protects nothing while looking like it does.
      */
     private static FakePluginContext contextEnforcingBackendOwnedKeys(String... episodeIds) {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        FakeFeedAccess feeds = released(episodeIds);
         InMemoryDocStore store = new InMemoryDocStore()
                 .withBackendOwned("stats", "favourites", "index", "drafts", "announced");
         return new FakePluginContext(store, new MapPluginConfig(), feeds, null).withReadsAllUsers();
@@ -150,7 +166,7 @@ class SamplePluginTest {
         // Degrading to an empty tally would publish "nobody favourited anything" as a fact, so the recompute
         // in register() throws instead — and the host refuses to load a plugin whose register() throws,
         // which is the loud failure a manifest/code disagreement deserves.
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")));
+        FakeFeedAccess feeds = released("ep-1");
         FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
         ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
 
@@ -306,7 +322,7 @@ class SamplePluginTest {
     @Test
     void doesNotPublishAContentlessHighlightToTheSitemapOrOpenGraph() {
         // Reachable between scheduled prunes: the frontend writes the doc, recompute hasn't run yet.
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1", "ep-2")))
+        FakeFeedAccess feeds = released("ep-1", "ep-2")
                 .withDisplay("ep-1", new DisplaySnapshot("Blank", null, null, null, null, null, null, null, null, ""));
         FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("   "));
@@ -434,7 +450,7 @@ class SamplePluginTest {
 
     @Test
     void metaForCombinesTheHighlightMarkdownWithTheFeedDisplaySnapshot() {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")))
+        FakeFeedAccess feeds = released("ep-1")
                 .withDisplay(
                         "ep-1",
                         new DisplaySnapshot(
@@ -464,7 +480,7 @@ class SamplePluginTest {
         // the shell's locale picks, so the host's resolved locale is already right. Naming one here would put
         // og:locale=en_US and <html lang="en"> on exactly the ?lang=de URL that urls() declares a German
         // alternate for — one plugin making two contradictory claims about one URL.
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")))
+        FakeFeedAccess feeds = released("ep-1")
                 .withDisplay("ep-1",
                         new DisplaySnapshot("Der Leuchtturm", null, null, null, null, null, null, null, null, ""));
         FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers()
@@ -576,7 +592,7 @@ class SamplePluginTest {
     /** The same, with an {@code imageSweep} value configured. */
     private static FakePluginContext contextWithBlobs(InMemoryPluginBlobs blobs, MapPluginConfig config,
                                                       String... episodeIds) {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        FakeFeedAccess feeds = released(episodeIds);
         return new FakePluginContext(new InMemoryDocStore(), config, feeds, null, blobs).withReadsAllUsers();
     }
 
@@ -839,7 +855,7 @@ class SamplePluginTest {
     // an author writes by hand, and the one test this interface's unusual access rule demands.
 
     private static FakePluginContext contextForSearch() {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken", "the-lighthouse")))
+        FakeFeedAccess feeds = released("the-kraken", "the-lighthouse")
                 .withDisplay("the-kraken",
                         new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null, ""))
                 .withDisplay("the-lighthouse",
@@ -966,7 +982,7 @@ class SamplePluginTest {
 
     @Test
     void exportsTheEpisodesAVisitorMarkedWithTitlesCoreCouldNotSupply() {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken")))
+        FakeFeedAccess feeds = released("the-kraken")
                 .withDisplay("the-kraken",
                         new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null, ""));
         FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
@@ -1003,7 +1019,7 @@ class SamplePluginTest {
     // itself the assertion that this plugin never reaches for a capability its manifest does not declare.
 
     private static FakePluginContext contextWithTags(FakeTags tags, String... episodeIds) {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
+        FakeFeedAccess feeds = released(episodeIds);
         return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers().withTags(tags);
     }
 
@@ -1227,7 +1243,7 @@ class SamplePluginTest {
 
     /** One episode with a feed snapshot, which {@code metaFor} needs for its title and artwork. */
     private static FakePluginContext contextWithDisplay(String episodeId) {
-        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeId)))
+        FakeFeedAccess feeds = released(episodeId)
                 .withDisplay(episodeId,
                         new DisplaySnapshot("The Kraken", null, null, null, null, null, null, null, null, ""));
         return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
@@ -1476,6 +1492,105 @@ class SamplePluginTest {
         plugin.register(ctx);
 
         assertEquals(Optional.empty(),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    // ---- Quiet planned episodes (SDK 0.18.0, core 0.7.7) ------------------------------------------------
+
+    /** ep-1 released, ep-2 planned and not announced; both with a highlight. */
+    private FakePluginContext oneQuietOneReleased() {
+        FakeFeedAccess feeds = released("ep-1", "ep-2").withPhase("ep-2", EpisodePhase.PLANNED);
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                .withReadsAllUsers();
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the lighthouse"));
+        ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("the secret one"));
+        return ctx;
+    }
+
+    @Test
+    void publishesNothingThatNamesAQuietPlannedEpisode() {
+        // A backend sees a planned episode before anyone else does — that is when a highlight gets prepared —
+        // and everything below is readable by an anonymous visitor. Each would name an episode the site is
+        // still hiding, with its title and the podcaster's prose attached.
+        FakePluginContext ctx = oneQuietOneReleased();
+
+        plugin.register(ctx);
+
+        HighlightIndex index = ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow();
+        assertEquals(List.of("ep-1"), index.entries().stream().map(IndexEntry::slug).toList());
+        HighlightStats stats = ctx.store().get(Scope.site(), "stats", HighlightStats.class).orElseThrow();
+        assertEquals(1, stats.totalEpisodes(), "the count would give the planned episode away too");
+        assertEquals(1, stats.highlightedEpisodes());
+        assertEquals(List.of(new SitemapUrl("/p/sample/highlight/ep-1", null)), plugin.urls());
+        assertEquals(Optional.empty(), plugin.metaFor("highlight/ep-2"));
+        assertFalse(plugin.hasRoute("highlight/ep-2"), "a real 404, not a page that says nothing is there");
+        assertEquals(List.of(), plugin.search("secret", null, 10));
+        // Prepared, not lost: the highlight itself is untouched for the podcaster to keep working on.
+        assertTrue(ctx.store().get(Scope.episode("ep-2"), "highlight", Highlight.class).isPresent());
+    }
+
+    @Test
+    void anAnnouncedEpisodeIsPublicBeforeItIsReleased() {
+        // UPCOMING is everyone's "coming soon" card: hiding its highlight would be the opposite mistake.
+        FakePluginContext ctx = oneQuietOneReleased();
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.UPCOMING);
+
+        plugin.register(ctx);
+
+        assertEquals(List.of("ep-1", "ep-2"), ctx.store().get(Scope.site(), "index", HighlightIndex.class)
+                .orElseThrow().entries().stream().map(IndexEntry::slug).toList());
+        assertTrue(plugin.hasRoute("highlight/ep-2"));
+    }
+
+    @Test
+    void checksThePhasePerRequestBecauseItMovesWithNothingWritten() {
+        // The index is as old as the last pass. A podcaster moving an announcement later puts an UPCOMING
+        // episode back into PLANNED without a write anywhere — the per-request surfaces must notice at once.
+        FakePluginContext ctx = oneQuietOneReleased();
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.UPCOMING);
+        plugin.register(ctx);
+
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.PLANNED);
+
+        assertFalse(plugin.hasRoute("highlight/ep-2"));
+        assertEquals(List.of(new SitemapUrl("/p/sample/highlight/ep-1", null)), plugin.urls());
+        assertEquals(List.of(), plugin.search("secret", null, 10), "the stale index entry must not surface");
+    }
+
+    @Test
+    void listsAPreparedHighlightAsSoonAsItsEpisodeIsReleased() {
+        FakePluginContext ctx = oneQuietOneReleased();
+        plugin.register(ctx);
+        assertEquals(1, ctx.episodeReleasedListenerCount());
+
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.RELEASED);
+        ctx.fireEpisodeReleased("ep-2");
+
+        // Not an interval later: the release hook recomputes. The schedule would get there too, which is
+        // what makes the hook — best effort by contract — safe to rely on as a shortcut only.
+        assertEquals(List.of("ep-1", "ep-2"), ctx.store().get(Scope.site(), "index", HighlightIndex.class)
+                .orElseThrow().entries().stream().map(IndexEntry::slug).toList());
+    }
+
+    @Test
+    void announcesNothingWrittenWhileAnEpisodeWasQuiet() {
+        // Translations written while preparing are part of what the episode has on release, not news about
+        // it: the first public pass seeds `announced` and tells nobody.
+        FakeNotifier[] out = new FakeNotifier[1];
+        UUID ana = UUID.randomUUID();
+        FakePluginContext ctx = announcing(out, ana, "ep-1");
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-1", EpisodePhase.PLANNED);
+        ctx.store().put(Scope.episode("ep-1"), "highlight",
+                Map.of("markdown", "the squid", "translations", Map.of("de", Map.of("markdown", "der Tintenfisch"))));
+        plugin.register(ctx);
+        assertEquals(Optional.empty(),
+                ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-1", EpisodePhase.RELEASED);
+        ctx.fireEpisodeReleased("ep-1");
+
+        assertEquals(List.of(), out[0].messagesFor(ana));
+        assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
                 ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
     }
 }

@@ -104,22 +104,29 @@ function internalLink(route: PluginRoute, subpath: string) {
  * `ctx.episodes` can be longer than that — so {@link displayAll} asks in batches. Before, the tail of a long
  * show was absent here, indistinguishable from "filtered out".
  */
-function useEpisodeDisplays(ctx: PluginContext, slugs: string[]): Record<string, DisplaySnapshot> {
+function useEpisodeDisplays(
+  ctx: PluginContext,
+  slugs: string[],
+): { displays: Record<string, DisplaySnapshot>; answered: boolean } {
   const [displays, setDisplays] = useState<Record<string, DisplaySnapshot>>({});
+  const [answered, setAnswered] = useState(false);
   // The join is the dependency: a new array with the same slugs must not re-fetch on every render.
   const key = slugs.join(',');
   useEffect(() => {
     const wanted = key ? key.split(',') : [];
     if (wanted.length === 0) return;
     displayAll(ctx, wanted)
-      .then(setDisplays)
+      .then((answer) => {
+        setDisplays(answer);
+        setAnswered(true);
+      })
       .catch(() => {
         // Cards degrade to their slugs rather than disappearing: the highlight is this plugin's content and
         // is worth showing even when the host's presentation layer is briefly unavailable.
         ctx.log('warn', 'episode display snapshots unavailable; falling back to slugs');
       });
   }, [ctx, key]);
-  return displays;
+  return { displays, answered };
 }
 
 /**
@@ -189,16 +196,24 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
   }, [ctx]);
 
   const canSeeDrafts = ctx.user?.role === 'podcaster' || ctx.user?.role === 'admin';
-  const entries = index?.entries ?? [];
+  const indexed = index?.entries ?? [];
 
   // `ctx.episodes` is the host's own access-filtered list, so the difference is only ever episodes this
   // visitor may already see — the gate on the unwritten view is about relevance, not secrecy.
-  const written = new Set(entries.map((e) => e.slug));
+  const written = new Set(indexed.map((e) => e.slug));
   const unwritten = ctx.episodes.filter((s) => !written.has(s));
 
   // One batched call covering every slug any view might draw. Deduplicated because an episode can appear
   // in both lists across a re-render, and `displayMany` charges by slug.
-  const displays = useEpisodeDisplays(ctx, [...new Set([...entries.map((e) => e.slug), ...ctx.episodes])]);
+  const { displays, answered } = useEpisodeDisplays(ctx, [
+    ...new Set([...indexed.map((e) => e.slug), ...ctx.episodes]),
+  ]);
+  // An entry the host *answered without* is one this visitor may not see — withdrawn, gated, or a planned
+  // episode gone quiet since the backend's last pass (SDK 0.18.0: a podcaster can move an announcement
+  // later, and nothing is written when they do). The backend leaves quiet episodes out of the index, but
+  // the index is only as fresh as that pass; this closes the gap for the visitor. A failed call is
+  // different — nothing was answered — so the cards still degrade to their slugs then.
+  const entries = answered ? indexed.filter((e) => e.slug in displays) : indexed;
   const title = (slug: string) => displays[slug]?.title ?? ctx.episodeLabels?.[slug] ?? slug;
 
   const sorted = sortEntries(entries, sort, displays);
@@ -344,6 +359,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
           display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
           border: 1px dashed var(--mc-border); border-radius: 0.6rem; padding: 0.5rem 0.7rem; font-size: 0.88rem;
         }
+        .todo .chip { font-size: 0.7rem; padding: 0.05rem 0.45rem; border: 1px solid var(--mc-border); border-radius: 999px; color: var(--mc-text-muted); }
         .todo a { color: var(--mc-accent-text); display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; }
 
         .detail { border: 1px solid var(--mc-border); border-radius: 0.75rem; background: var(--mc-surface); padding: 1rem 1.1rem; }
@@ -440,7 +456,7 @@ export function HighlightPage({ ctx }: { ctx: PluginContext }) {
           {match.pattern === 'gallery' && <GalleryView {...view} entries={pictures} />}
           {match.pattern === 'unwritten' &&
             (canSeeDrafts ? (
-              <UnwrittenView ctx={ctx} slugs={unwritten} i18n={i18n} title={title} />
+              <UnwrittenView ctx={ctx} slugs={unwritten} i18n={i18n} title={title} displays={displays} />
             ) : (
               // Reachable by typing the URL even though the entry was never offered. The host already
               // refuses the *data*; this is only about not rendering a staff view's chrome to a visitor.
@@ -815,11 +831,13 @@ function UnwrittenView({
   slugs,
   i18n,
   title,
+  displays,
 }: {
   ctx: PluginContext;
   slugs: string[];
   i18n: PluginI18n;
   title: (slug: string) => string;
+  displays: Record<string, DisplaySnapshot>;
 }) {
   if (slugs.length === 0) return <p className="empty">{i18n.t('page.unwritten.empty')}</p>;
   return (
@@ -827,6 +845,10 @@ function UnwrittenView({
       {slugs.map((slug) => (
         <li key={slug}>
           <span>{title(slug)}</span>
+          {/* A podcaster's `ctx.episodes` includes quiet planned episodes (SDK 0.18.0) — the one list here
+              where they appear, since preparing a highlight before the announcement is the point. Said, so
+              nobody mistakes one for a public episode with no highlight. */}
+          {displays[slug]?.phase === 'planned' && <span className="chip">{i18n.t('planned.chip')}</span>}
           {/* Out to core's episode page, where this plugin's own episode/main tile carries the editor. */}
           <a href={ctx.links.episode(slug)}>
             <Icon name="compose" />
