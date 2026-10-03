@@ -74,9 +74,11 @@ EpisodeRef
   access        Access       -- PUBLIC | TIER(ref)
   first_seen_at, last_seen_at
   provisional_display Json?   -- only set when PLANNED (see 4.3)
+  announce_at   Instant?     -- PLANNED only: when a quiet plan goes public; null = quiet until announced (4.3)
+  client_ref    String?      -- a planner's own reference, unique per feed; makes a retried create idempotent
 ```
 
-**Status lifecycle:** `PLANNED` → `PUBLISHED` → possibly `WITHDRAWN`.
+**Status lifecycle:** `PLANNED` → `PUBLISHED` → possibly `WITHDRAWN`. What plugins and the shell reason about is the **phase** derived from it (§4.3), not the stored status.
 
 ### 4.2 Display snapshot (NOT authoritative, from the feed)
 Title, description, audio URL, pubDate, runtime/duration (`<itunes:duration>`/enclosure), **episode artwork** (`itunes:image`) with the **feed/show cover** (channel `itunes:image`) as a fallback (`artwork()` = episode → feed), **author** (`itunes:author`, falling back to the channel author) and **subtitle** (`itunes:subtitle`). **Overwritten** on every fetch from the raw feed, only read-through cached. So a description change in the RSS propagates automatically and never lives in the DB as truth. **The description is third-party HTML** — whatever the podcast host published, so whoever controls the feed controls it. The shell renders it only through its sanitizer, and plugins receive it **verbatim and unsanitized**, documented as such, with `descriptionText` beside it: the same prose reduced to plain text by the host (Jsoup), for cards, teasers, OG descriptions and search excerpts. It is derived rather than stored for rows written before it existed, so no backfill is needed (platformApi 0.16.0). Plugins also receive the episode's **place in the site** — `feed` (the feed's public slug), `season`, `episodeNo` — which belongs to the identity layer (`EpisodeRef`, §4.4), not to the feed's presentation: the host adds it **on read** and **never stores it in the snapshot**, so a refetch rewriting the snapshot cannot move an episode between seasons in a plugin's eyes. Each is absent when the episode does not have it, and a season scope (`Scope.season(feed, n)`) only exists for an episode that has both (platformApi 0.17.0). (Episode **tags** — `itunes:keywords`/`<category>` — are feed-derived too but stored as a relation `episode_tag`, since they are a filter/scoping axis, §6.1.)
@@ -86,11 +88,26 @@ Table: `episode_display(episode_ref_id, snapshot JSONB, fetched_at)`. Swappable 
 
 ### 4.3 Planned episodes (PLANNED) – creating episodes before the RSS
 Hosts make bingos for the **upcoming** episode. So episodes must be creatable before they appear in the feed.
-- A podcaster creates a planned episode → `EpisodeRef` with `status=PLANNED`, `source=manual`, `provisional_display` (title + planned season/episode no.). **Only here** does display data live authoritatively in the DB — until the feed takes over.
+- A podcaster or admin creates a planned episode → `EpisodeRef` with `status=PLANNED`, `source=manual`, `provisional_display` (title, description, planned season/episode no.). **Only here** does display data live authoritatively in the DB — until the feed takes over. It is created in the admin area or over the API with a personal access token (§8.5); the answer carries the **slug**, so a follow-up call can prepare plugin content on it straight away. An optional `client_ref` makes a retried create return the existing plan instead of a second one.
 - Plugin data (bingos) attaches to the internal ID immediately.
-- When the real episode appears in the RSS → **binding instead of duplicating** (see 5.3). Status flips `PLANNED → PUBLISHED`, from then on the feed snapshot rules. Plugin data is untouched because it hung on the ID, not the feed.
+- When the real episode appears in the RSS → **binding instead of duplicating** (see 5.3). Status flips `PLANNED → PUBLISHED`, from then on the feed snapshot rules. Plugin data is untouched because it hung on the ID, not the feed. The **slug is kept**, so links shared before the release keep working; the feed's title and description replace the planned ones everywhere.
 
-`PLANNED` = bingo prediction phase, `PUBLISHED` = resolution.
+**Quiet first, announced later.** A plan is **quiet by default**: only podcasters and admins see it, so content can be prepared without telling the audience. `announce_at` makes it public from that moment; it can also be announced by hand, or set back to quiet while it is still planned. **The feed outranks the schedule**: a feed item that binds before `announce_at` releases the episode anyway. A quiet episode stays out of **every** public surface — lists, detail, search, tags, related, previous/next, link previews, sitemap, and the scope checks plugin requests go through — and a podcaster opening it sees a notice that nobody else can. A plugin's **backend** (`FeedAccess`) sees quiet episodes, because preparing them is the point; a plugin's **frontend** sees one only when the viewer may.
+
+**Phase, derived at read time, no scheduler** (`EpisodePhase`, platformApi 0.18.0):
+
+| phase | stored state | who sees it |
+|---|---|---|
+| `PLANNED` | `PLANNED`, `announce_at` null or in the future | podcasters, admins, plugin backends |
+| `UPCOMING` | `PLANNED`, `announce_at` reached | everyone — "upcoming" stub, no audio |
+| `RELEASED` | `PUBLISHED` | everyone |
+| `WITHDRAWN` | `WITHDRAWN` | as §5.2 |
+
+Nothing flips at `announce_at`: every read compares it with the clock, so there is no job to miss and no window in which the episode is half-announced. Plugins read the phase and are **told** of a release (§7.4); they never infer it from a title or a date.
+
+**Editing and cancelling.** While an episode is planned, its title, description, numbers and `announce_at` can be changed. Once released, its details are the feed's and the planning API refuses. Cancelling a plan deletes it **together with the plugin data prepared for it**, since nothing else could ever reach that data again.
+
+`PLANNED` = preparation (quiet), `UPCOMING` = bingo prediction phase, `RELEASED` = resolution.
 
 ### 4.4 Season as a first-class concept
 Season is **not** a plugin concern. The fetcher extracts `itunes:season` and persists it as a relation on the `EpisodeRef`. A season = "all EpisodeRefs of a feed with season=N". Season is a **scope** (§6).
@@ -127,6 +144,8 @@ Match by `(source_id, external_guid)`:
 ### 5.3 PLANNED binding & dedup (same machinery)
 Before creating a new ref for an unknown GUID, the reconciler checks whether a `PLANNED` ref matches: first by declared season/episode no., otherwise fuzzy title → **suggestion, podcaster confirms**. On binding: set `external_guid` + `source`, `PLANNED → PUBLISHED`.
 This is the **same merge machinery** as v2 dedup (multiple refs → one canonical episode, fuzzy-title merge UI), just triggered at a different time. v1: only PLANNED binding active; the model allows later merging without a rewrite.
+
+**Manual match** covers what neither the numbers nor the title caught, after the feed has already imported the item as an episode of its own. A podcaster matches the plan to that episode: the plan **keeps its identity, slug and plugin data** and takes over the feed item. Listeners' progress, pins and tags move across, and the duplicate is removed. A duplicate that already has **plugin data of its own is refused** with a message saying so, and nothing changes: merging two plugins' worth of state is a decision the host cannot make on a plugin's behalf. Every path that releases a planned episode — binding, a confirmed suggestion, a manual match — announces it to plugins after the transaction commits (§7.4).
 
 ### 5.4 Scheduler
 One periodic job per FeedSource config, **ShedLock-wrapped** (runs only once across N instances). Default 15–30 min, configurable per feed. `pushBased` sources skip polling. "Refresh now" button for podcasters. Dead feeds: backoff, last successful state stays visible. Polling uses **HTTP conditional GET** (ETag / If-Modified-Since) — polite to feed hosts; an unchanged feed costs a 304.
@@ -278,12 +297,19 @@ public interface PluginContext {
     FeedAccess   feeds();
     void onSchedule(Supplier<Duration> every, Runnable task); // ShedLock-wrapped; period re-read per tick
     default void onSchedule(Duration every, Runnable task);   // fixed cadence, captured once
+    default void onEpisodeReleased(Consumer<String> slug);    // a planned episode became RELEASED (0.18.0)
 }   // The supplier form (platformApi 0.15.0) is what a configurable interval needs: the host consults it
     // before every fire and reschedules when the answer changes, so an operator's edit takes effect within
     // one old period instead of at the next restart. It is consulted, not trusted — null, a non-positive
     // Duration or a throw leaves the task on the last period that was valid, and only the value at
     // registration is strict. The host clamps to an operator-owned floor (`mosaicast.plugin-schedule
     // .min-period`, default 10s): the period is a request, like the manifest's other numbers.
+    // onEpisodeReleased fires once a planned episode is released (§4.3, §5.3), after the commit, so a
+    // listener reads the released state. Each call runs off the releasing thread, and one that throws is
+    // logged in that plugin's log without affecting the others. Best effort: nothing is queued or retried,
+    // and a plugin that was not loaded misses it — it reconciles by reading `DisplaySnapshot.phase()`.
+    // The snapshot carries `phase` and `announceAt` beside the placement fields (§4.2): filled on read
+    // from the identity layer, never stored.
 interface DocStore {
     <T> Optional<T> get(Scope scope, String key, Class<T> type);
     void            put(Scope scope, String key, Object value);
@@ -333,7 +359,9 @@ The host mounts the custom element and sets `ctx`. This is the **entire** interf
 interface PluginContext {
   scope:    { type: 'site'|'feed'|'season'|'episode'; id: string };
   episodes: string[];                 // EpisodeRef IDs in scope (resolved by the host)
-  episode?: { status: 'PLANNED'|'PUBLISHED'|'WITHDRAWN' }; // on episode scope
+  episode?: { status: 'PLANNED'|'PUBLISHED'|'WITHDRAWN';   // on episode scope (§4.3):
+              phase: 'planned'|'upcoming'|'released'|'withdrawn';   // the derived phase (0.18.0)
+              announceAt?: string };  // ISO instant, while planned; a phase change hands over a new ctx
   user:     { id: string; role: Role; displayName: string; avatarUrl: string } | null;
   users:    UserDirectory | null;     // resolve(ids) → who the other UUIDs are; null unless the
                                       // manifest declares `identity` (§8.8)
@@ -440,7 +468,7 @@ In short: **auto-link only with two verified emails or a logged-in user, otherwi
 - **httpOnly cookie + server-side session** (Spring Session). **No JWT** (revoke/ban/role change must take effect immediately). In-memory in v1 → **Redis from v3** (app instances stay stateless). Cookie sessions require **CSRF protection** (Spring's `XSRF-TOKEN` cookie pattern for the SPA) and `SameSite=Lax`.
 - RBAC, `role` on the `User`: **ADMIN** (site config, users, plugin activation) · **PODCASTER** (bingos, wiki, episodes, feeds/Patreon sources, planned episodes) · **FAN** (fill in/view). Anonymous: read only.
 - Bootstrap admin via env on first start; afterwards the admin promotes fans → podcasters.
-- **Personal access tokens** (podcaster-scoped) for automation (e.g. MAT upload).
+- **Personal access tokens** (podcaster-scoped) for automation (e.g. MAT upload, planning episodes from a CMS, §4.3).
 
 ### 8.6 Display name
 Prefilled from the provider at account creation and **never overwritten by a later login** — a name someone chose is not a cache of their Discord profile, and with several identities linked (§8.3) there is no non-arbitrary answer to which provider's name would win. From settings they may change it.
@@ -506,7 +534,7 @@ Patreon appears in **three mutually independent places**; they die independently
 Each `EpisodeRef.access = PUBLIC | TIER(ref)`. **The host makes the access decision, not the plugin.** At render time `unlocked = userEntitlement.satisfies(access)`.
 - v1 (RSS only): everything PUBLIC.
 - v2: free Patreon episodes PUBLIC (always visible); paid ones as a **locked stub** with a "view on Patreon" CTA, real link on matching tier.
-- PLANNED episodes: "upcoming episode" stub, no audio, bingo open.
+- PLANNED episodes: "upcoming episode" stub, no audio, bingo open — once announced. A quiet one (§4.3) is not gated but **absent**: to anyone below podcaster it does not exist, which is a visibility rule the host applies before any access decision.
 Plugins only get the episode list the user may see; `ctx.user` stays slim.
 
 ---
