@@ -94,17 +94,28 @@ describe('HighlightPage — ctx.feeds', () => {
     expect([...new Set((ctx.feeds as MockFeedsClient).requested)].sort()).toEqual(['the-kraken', 'the-lighthouse']);
   });
 
-  it('skips an episode the host filtered out instead of treating it as an error', async () => {
-    // A WITHDRAWN or tier-gated episode is **absent** from the answer rather than redacted — telling the
-    // two apart would confirm the existence of an episode this visitor was never shown. So a missing key
-    // is normal, and the card falls back to what the plugin itself knows.
+  it('drops a card the host answered without, instead of treating it as an error', async () => {
+    // A withdrawn, gated or quiet planned episode is **absent** from the answer rather than redacted —
+    // telling those apart would confirm an episode this visitor was never shown. Until 2.19.0 the card fell
+    // back to its slug; with quiet planned episodes (SDK 0.18.0) that slug and its excerpt are exactly what
+    // must not show, in the window before the backend's next pass drops the entry from the index.
     const ctx = pageCtx({ feeds: makeMockFeeds({ 'the-kraken': snapshot() }) });
     const container = mount(ctx);
     await flush();
 
     expect(container.textContent).toContain('The Kraken');
-    expect(container.textContent).toContain('the-lighthouse'); // degrades to the slug, still listed
+    expect(container.textContent).not.toContain('the-lighthouse');
     expect(ctx.logs.filter((l) => l.level === 'error')).toEqual([]);
+  });
+
+  it('still degrades to slugs when the host could not answer at all', async () => {
+    const feeds = makeMockFeeds();
+    feeds.displayMany = () => Promise.reject(new Error('host down'));
+    const container = mount(pageCtx({ feeds }));
+    await flush();
+
+    expect(container.textContent).toContain('the-kraken');
+    expect(container.textContent).toContain('the-lighthouse');
   });
 
   it('places each card in its season from the snapshot (SDK 0.17.0), and leaves a bonus episode unplaced', async () => {
@@ -229,6 +240,29 @@ describe('HighlightPage — routing', () => {
 
     expect(container.textContent).not.toContain('No such highlight');
     expect(container.textContent).toContain("for the show's own team");
+  });
+
+  it('marks a quiet planned episode in the podcaster’s to-write list (SDK 0.18.0)', async () => {
+    // Only a podcaster's `ctx.episodes` holds a quiet planned episode, and this is the one list here where it
+    // belongs — preparing before the announcement is the point — so it says which one it is.
+    const feeds = makeMockFeeds({ 'the-kraken': snapshot(), 'the-plan': snapshot({ title: 'The Plan' }) }).withPhase(
+      'the-plan',
+      'planned',
+    );
+    const container = mount(
+      pageCtx({
+        route: { path: 'unwritten' },
+        episodes: ['the-kraken', 'the-plan'],
+        feeds,
+        user: mockUser('p-1', 'podcaster'),
+      }),
+    );
+    await flush();
+
+    const rows = [...container.querySelectorAll('.todo li')];
+    const plan = rows.find((r) => r.textContent!.includes('The Plan'))!;
+    expect(plan.querySelector('.chip')!.textContent).toBe('Not announced');
+    expect(rows.filter((r) => r.querySelector('.chip'))).toHaveLength(1);
   });
 });
 
