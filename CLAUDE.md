@@ -17,6 +17,7 @@ Java 21 (Gradle, PF4J extension) · React + Vite (Web Component)
 cd backend && ./gradlew test  ;  cd ../frontend && npm test && npm run typecheck
 ```
 Vite does not type-check — `npm run typecheck` (`tsc --noEmit`) is the only thing that does.
+**Lockfile: regenerate with CI's npm** after any `npm install` — `cd frontend && npx -y npm@10.9.9 install --package-lock-only --ignore-scripts`. CI is Node 22 / npm 10; npm 11 (Node 24) drops vitest's nested optional `esbuild` from the lock and CI's `npm ci` then refuses it (red Frontend/Package jobs on #50–#55). An npm-10 lock passes `npm ci` under both.
 
 ## Conventions (binding)
 - Java packages `dev.mosaicast.*`; npm scope `@mosaicast`.
