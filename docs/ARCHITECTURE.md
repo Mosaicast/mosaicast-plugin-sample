@@ -70,6 +70,8 @@ EpisodeRef
   external_guid String?      -- the source's GUID (null when PLANNED)
   season        Int?         -- from itunes:season, persisted as a relation
   episode_no    Int?
+  numbers_pinned Bool        -- season + episode_no set by a podcaster; polls no longer overwrite them (4.4)
+  feed_season, feed_episode_no Int?  -- what the feed last declared, so un-pinning restores it at once (4.4)
   status        Enum         -- PLANNED | PUBLISHED | WITHDRAWN
   access        Access       -- PUBLIC | TIER(ref)
   first_seen_at, last_seen_at
@@ -103,7 +105,7 @@ Hosts make bingos for the **upcoming** episode. So episodes must be creatable be
 | `RELEASED` | `PUBLISHED` | everyone |
 | `WITHDRAWN` | `WITHDRAWN` | as §5.2 |
 
-Nothing flips at `announce_at`: every read compares it with the clock, so there is no job to miss and no window in which the episode is half-announced. Plugins read the phase and are **told** of a release (§7.4); they never infer it from a title or a date.
+Nothing flips at `announce_at`: every read compares it with the clock, so there is no job to miss and no window in which the episode is half-announced. Plugins read the phase and are **told** of a release, and of any *write* that changes the phase (§7.4); they never infer it from a title or a date.
 
 **Editing and cancelling.** While an episode is planned, its title, description, numbers and `announce_at` can be changed. Once released, its details are the feed's and the planning API refuses. Cancelling a plan deletes it **together with the plugin data prepared for it**, since nothing else could ever reach that data again.
 
@@ -111,6 +113,8 @@ Nothing flips at `announce_at`: every read compares it with the clock, so there 
 
 ### 4.4 Season as a first-class concept
 Season is **not** a plugin concern. The fetcher extracts `itunes:season` and persists it as a relation on the `EpisodeRef`. A season = "all EpisodeRefs of a feed with season=N". Season is a **scope** (§6).
+
+**A podcaster can set the numbers by hand.** A feed cannot always say what the podcaster means: Apple's spec allows only a non-zero `itunes:episode`, so the season prologue a podcaster calls episode 0 arrives with a season and no number (Acast drops the 0). A podcaster or admin may therefore set a released episode's `season` and `episode_no` — **both together**, and either may be empty — which sets `numbers_pinned`. From then on the reconciler still records what the feed declares, in `feed_season` / `feed_episode_no`, but leaves the effective numbers alone, so a poll never undoes the choice; un-pinning restores the feed's values immediately, without waiting for a poll. The pinned numbers are the episode's numbers **everywhere** — season scope and filter, listing order, labels, and the `season` / `episodeNo` plugins receive (§4.2) — and change nothing else: the slug was minted once and is kept (§4.1), and previous/next still follow release order (§6.2), so an explicit 0 is a podcaster's statement, not the coercion §6.2 rules out. A **planned** episode has no override: its numbers are edited with the plan (§4.3), and on binding the feed's numbers take over as for any new item — unless the plan is matched to an imported episode whose numbers a podcaster had already pinned, in which case the pin moves across with it, like its tags (§5.3). The host never infers a number on its own — not from a title (`5.00 Prolog`), not from a gap in the sequence.
 
 ---
 
@@ -138,7 +142,7 @@ record RawEpisode(String externalGuid, String title, String description, String 
 ### 5.2 Reconciler – raw items become EpisodeRefs
 Match by `(source_id, external_guid)`:
 1. **New GUID** → create `EpisodeRef` (identity + relations only).
-2. **Known GUID** → refresh season relation + display snapshot, plugin data untouched.
+2. **Known GUID** → refresh season relation (only the `feed_*` record when the podcaster pinned the numbers, §4.4) + display snapshot, plugin data untouched.
 3. **Ref exists, GUID now missing** → **never hard delete** (plugin data would orphan, feeds glitch). Set `status=WITHDRAWN`.
 
 ### 5.3 PLANNED binding & dedup (same machinery)
@@ -251,6 +255,7 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
   ],
   "storage": "doc",
   "data":    { "readableBy": "fan", "writableBy": "podcaster", "backendOwned": ["stats", "agg:*"],
+               "keyFloors": [ { "keys": ["import:*"], "readableBy": "podcaster" } ],
                "readsAllUsers": true },
   "config":  { "fuzzyThreshold": { "type": "number", "default": 0.85, "editableBy": "podcaster",
                                    "min": 0, "max": 1 },
@@ -265,8 +270,8 @@ A plugin = **one folder**: backend JAR (PF4J extension) + `frontend/` (built Web
 - **`platformApi`**: which SDK contract version it was built against. The host **rejects incompatible plugins at startup** (stability anchor). The match is an exact `major.minor` (pre-1.0 the minor carries breaking changes); the patch floats.
 - **`frontend`**: the ES module `entry` and the custom `elements` it registers. `entry` is the one manifest string that becomes a URL path (`/plugins/<id>/assets/<entry>`), so it has a grammar like every sibling path-shaped string: a relative path under the plugin's own `assets/` — `[A-Za-z0-9._-]` segments joined by `/`, no leading `/`, no `.`/`..` segment, no query or fragment. A non-matching entry **rejects the plugin at load** rather than being rewritten: loading a URL the author did not write is worse than naming the mistake (`FRONTEND_ENTRY_PATTERN` in the SDK).
 - **`slots`**: scope + Web Component + `placement` (named region) + `visibleTo` (minimum role) + optional `order`.
-- **`storage`**: `"doc"` = generic JSONB store. For the wiki, a schema declaration instead (§7.6).
-- **`data`**: the access floor of the generic data surface (§7.6) — `readableBy` / `writableBy`, each `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`. **Declared, never derived:** the host does not infer it from slots. An absent block defaults `readableBy` to the *write* floor, not to anonymous — a **behaviour change**: a plugin that relied on an anonymous slot making its data anonymously readable must now declare `readableBy: "anonymous"` to keep it. A slot's `visibleTo` governs **rendering only**. Neither floor applies to the `USER` scope (§7.6). `backendOwned` names the keys only the plugin's **backend** may write — an exact key, a `*`-terminated prefix, or the bare `*`; clients may still read them (subject to `readableBy`) and a client `PUT`/`DELETE` is a **403** the host words apart from the role-floor one, so an author can tell which rule refused them. It is the only **per-key** rule on this surface; see §7.6 for why it is needed and what it does not do. `readsAllUsers: true` grants the backend's `ctx.allUsers()` — the read of **every** user's `USER` partition, owner ids included (§7.4). Absent means no. It is declared because it is the one read that crosses an ownership boundary: "can enumerate every account that ever used me" is not what the `USER` scope alone implies, and an operator should be able to read it off the manifest — the admin plugin page shows it. Until platformApi 0.16.0 every plugin had it by existing, as `DocStore.queryAcrossUsers`.
+- **`storage`**: `"doc"` = generic JSONB store. For the wiki, a schema declaration instead (§7.6), optionally with **`schemaReadableBy`** — the schema read surface's own floor, any of the four roles, defaulting to `data.readableBy` (platformApi 0.19.0). It is a sibling of `schema` rather than inside it because `schema` maps entity names, and a floor there would take one up.
+- **`data`**: the access floor of the generic data surface (§7.6) — `readableBy` / `writableBy`, each `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`. **Declared, never derived:** the host does not infer it from slots. An absent block defaults `readableBy` to the *write* floor, not to anonymous — a **behaviour change**: a plugin that relied on an anonymous slot making its data anonymously readable must now declare `readableBy: "anonymous"` to keep it. A slot's `visibleTo` governs **rendering only**. Neither floor applies to the `USER` scope (§7.6). `backendOwned` names the keys only the plugin's **backend** may write — an exact key, a `*`-terminated prefix, or the bare `*`; clients may still read them (subject to `readableBy`) and a client `PUT`/`DELETE` is a **403** the host words apart from the role-floor one, so an author can tell which rule refused them. `keyFloors` (platformApi 0.19.0) raises the read or write floor of the keys it names — `[{ "keys": [...], "readableBy"?, "writableBy"? }]`, the same selector grammar as `backendOwned`. Together they are the only **per-key** rules on this surface; see §7.6 for why they are needed and what they do not do. `readsAllUsers: true` grants the backend's `ctx.allUsers()` — the read of **every** user's `USER` partition, owner ids included (§7.4). Absent means no. It is declared because it is the one read that crosses an ownership boundary: "can enumerate every account that ever used me" is not what the `USER` scope alone implies, and an operator should be able to read it off the manifest — the admin plugin page shows it. Until platformApi 0.16.0 every plugin had it by existing, as `DocStore.queryAcrossUsers`.
 - **`blobs`**: opt-in file storage (§11.1) — `maxFileBytes`, `quotaBytes`, `mimeTypes`, and optionally its own `readableBy` / `writableBy` (defaulting to the `data` floors). Declared, never derived, like `data`: what a plugin may write to disk should be readable off its manifest. Absent = no file storage at all. The operator caps every number and intersects the type list with the install's own, so a plugin is granted the smaller of the two rather than rejected for asking. `image/svg+xml` is refused at load — SVG is never storable (§12.2).
 - **`tags`**: opt-in access to the shared tag vocabulary (§6.1.1) — `{ "readsVocabulary": true, "writesEpisodes": false }`. Declared, never derived, like `data` and `blobs`; absent means **no tag surface at all** (`ctx.tags` is null, the endpoints 404). Two flags because the two acts are not alike: tagging a plugin's own subjects touches rows nobody else can name, while tagging an **episode** changes the shell's filter options and what core recommends beside that episode — a capability an operator should be able to read off a manifest before installing. A block declaring neither is refused at load, since it would produce a surface that exists and refuses everything.
 - **`identity`**: opt-in resolution of user UUIDs to a name and a picture (§8.8) — `{ "resolvesUsers": true }`. Declared, never derived, like `data`, `blobs` and `tags`; absent means `ctx.users` is null and the endpoint 404s. It is a declaration and not a derivation because a plugin already *holds* user ids — the doc store's `USER` scope and the cross-user read (`ctx.allUsers()`, declared as `data.readsAllUsers`) both hand them over — so the capability being granted is not access to the ids but the turning of them into people, and that is the part an operator should be able to read off a manifest before installing.
@@ -298,6 +303,7 @@ public interface PluginContext {
     void onSchedule(Supplier<Duration> every, Runnable task); // ShedLock-wrapped; period re-read per tick
     default void onSchedule(Duration every, Runnable task);   // fixed cadence, captured once
     default void onEpisodeReleased(Consumer<String> slug);    // a planned episode became RELEASED (0.18.0)
+    default void onEpisodePhaseChanged(BiConsumer<String, EpisodePhase> listener); // a write moved it (0.19.0)
 }   // The supplier form (platformApi 0.15.0) is what a configurable interval needs: the host consults it
     // before every fire and reschedules when the answer changes, so an operator's edit takes effect within
     // one old period instead of at the next restart. It is consulted, not trusted — null, a non-positive
@@ -308,6 +314,14 @@ public interface PluginContext {
     // listener reads the released state. Each call runs off the releasing thread, and one that throws is
     // logged in that plugin's log without affecting the others. Best effort: nothing is queued or retried,
     // and a plugin that was not loaded misses it — it reconciles by reading `DisplaySnapshot.phase()`.
+    // onEpisodePhaseChanged (0.19.0) is the general case: it fires when a *write* changes an episode's
+    // derived phase — compared before and after the write at one instant — with the slug and the new
+    // phase: announce, an `announceAt` edit either way, every release path, a withdrawal, a withdrawn
+    // episode returning, and an episode that no longer exists (phase null): a cancelled plan, or the
+    // duplicate a match or a confirmed suggestion removed. The clock passing
+    // `announceAt` fires nothing, since no write happened and becoming visible late is harmless; becoming
+    // *hidden* late is a leak, which is why the write that hides an episode must tell plugins at once. Same
+    // delivery as onEpisodeReleased, and on a release those listeners run first.
     // The snapshot carries `phase` and `announceAt` beside the placement fields (§4.2): filled on read
     // from the identity layer, never stored.
 interface DocStore {
@@ -358,7 +372,8 @@ The host mounts the custom element and sets `ctx`. This is the **entire** interf
 ```ts
 interface PluginContext {
   scope:    { type: 'site'|'feed'|'season'|'episode'; id: string };
-  episodes: string[];                 // EpisodeRef IDs in scope (resolved by the host)
+  episodes: string[];                 // EpisodeRef IDs in scope (resolved by the host, for this viewer:
+                                      // a quiet planned episode only for a podcaster or admin, §4.3)
   episode?: { status: 'PLANNED'|'PUBLISHED'|'WITHDRAWN';   // on episode scope (§4.3):
               phase: 'planned'|'upcoming'|'released'|'withdrawn';   // the derived phase (0.18.0)
               announceAt?: string };  // ISO instant, while planned; a phase change hands over a new ctx
@@ -371,7 +386,8 @@ interface PluginContext {
                                       // `status` + the RFC-7807 body, and getOrNull resolves absence to null
   docs:     DocClient;                // typed doc store over the same endpoints, plus getMany(type, ids, keys);
                                       // dedupes and remembers misses (§7.6); never null
-  feeds:    FeedsClient;              // display(slug) / displayMany(slugs) — the frontend half of FeedAccess
+  feeds:    FeedsClient;              // display(slug) / displayMany(slugs) — the frontend half of FeedAccess;
+                                      // displayMany splits past 200 slugs and merges, never clamps (0.19.0)
   sanitize(html: string | null | undefined): string;  // the shell's own HTML policy; never null
   schema:   SchemaClient | null;      // read-only; null unless the manifest declares a schema (§7.6)
   blobs:    BlobClient | null;        // upload/list/delete; null unless the manifest declares `blobs` (§11.1)
@@ -407,6 +423,7 @@ interface PluginContext {
 - **Access floor:** declared in the manifest (`"data"`, §7.2), never derived from slots. The `USER` scope is exempt from **both** floors — see below.
 - **Authorization is per plugin, not per document.** A floor says *who*, never *which key*: clearing `writableBy` grants every key in every **shared** scope (`SITE`/`FEED`/`SEASON`/`EPISODE`), including one another caller wrote, because nothing binds a shared document to its author. Two rules narrow that, and neither closes it in general.
   - **`data.backendOwned`** (§7.2) reserves the keys the plugin's *backend* authors. Without it a plugin cannot express "this key is mine": the host cannot tell a scheduled write from a `curl`, so any caller above the write floor could forge a value the backend computed — a site-wide aggregate, a per-episode count — and have it served to every visitor as though the plugin had produced it. Reads are untouched, since the point is to publish a value rather than hide it, and `ctx.store()` is unaffected — enforcement is on the HTTP surface only, so the `DocStore` contract does not change. It is **ignored for `USER` scopes**, even under a bare `*`: a backend cannot write a partition there at all, so reserving one would reserve it for nobody. A declaration does **not** remove a value a client wrote before it existed, so a plugin writes its computed keys in `register(ctx)` as well as on a schedule. A malformed entry **rejects the plugin at load** (§7.8) rather than being dropped — a dropped entry loads a plugin whose manifest claims a key is the backend's while the host enforces nothing, which is the worst way for a security declaration to fail.
+  - **`data.keyFloors`** (§7.2, platformApi 0.19.0) raises the floor of named keys: public numbers beside private bookkeeping, an admin-only setting beside podcaster-writable ones. **Raise-only** — a floor below the plugin's own (`readableBy` against the effective read floor, `writableBy` against the write floor), `writableBy: "anonymous"`, an empty `keys`, an entry with neither floor or a malformed selector **rejects the plugin at load**, for the reason `backendOwned` does. Where several entries match a key the **strictest** wins, per direction. A write is checked plugin floor → `backendOwned` → key floor, each with its own problem type (`…/problems/forbidden`, `…/backend-owned-key`, `…/key-floor`), so an author can tell which refused them. A single `GET`/`PUT`/`DELETE` below a key's floor is a **403**; a **listing** drops such keys *before* paging, so its totals count only what the reader may see; a **batch read** leaves them absent, like a miss. Ignored for `USER` scopes and for `ctx.store()`, like `backendOwned`. It is a minor bump rather than a silent addition because the host ignores unknown manifest keys: a host that predates it would load the plugin and serve its "private" keys at the plugin floor.
   - The **`USER` scope** gives per-user data a partition no request can name (below).
   - **What remains open:** an unreserved key in a shared scope still has no owner, so on a multi-podcaster install one tenant can overwrite or delete another's plugin data. Closing it needs per-record ownership, which needs an owner in the domain model — feeds do not have one yet (§5, roadmap §14). Until then a plugin that needs the guarantee reserves the key or keeps the data in `USER` scope, and a plugin author should know the host does not otherwise make it.
 - **Default store:** `plugin_data(plugin_id, scope_type, scope_id, key, value JSONB)` + GIN index. Scales comfortably to thousands in Postgres. Optional: a plugin declares **indexable fields** (expression index) as an escape hatch. Writes are **last-write-wins** — plugins needing stronger concurrency control model it in their data design. **Per-user data belongs in the `USER` scope, never in the key.** A key is client-supplied, so a convention like `mark:<userId>:cell` is an access-control decision the host cannot enforce: any caller above the plugin's read floor can address another user's key directly, and scope ids are public slugs, so nothing has to be guessed. The `USER` scope is addressed as `user/me` and resolved server-side from the session, so the partition a caller reaches is the only one they can name. **Neither floor applies to it.** `readableBy` does not, in either direction: no floor makes another user's partition readable, and none stands between a caller and their own. `writableBy` does not either — a write floor protects the *shared* surface, where one caller's write is visible to others and can overwrite theirs, and a `USER` partition is unshared by construction, so there is nobody to protect from it. Gating it would also re-create the coupling this rule exists to remove: a plugin needing a per-user feature would have to declare `writableBy: "fan"`, opening its *shared* scopes to fan writes — the same "one setting forced by an unrelated need" failure as the old minimum-across-slots read floor, moved to the write side. So any authenticated caller reads and writes their own `user/me` whatever the plugin declares; any other `user` id is a **400** (never a silent substitution) and an anonymous request a **401**, since there is no session to resolve. The partition is flat — one per user, not one per user *and* entity — so the entity goes in the key (`mark:<episodeSlug>:cell`). Aggregating across users is the backend's job via `ctx.allUsers()` (§7.4, declared as `data.readsAllUsers`), not the client's: a summary each browser reports about itself is a summary of whatever users typed.
@@ -424,7 +441,7 @@ interface PluginContext {
   GET /api/plugins/{id}/schema/{entity}/count?where=
   GET /api/plugins/{id}/schema/{entity}/{rowId}
   ```
-  A query is *described*, never written: `where=field:op:value` and `orderBy=field:asc|desc` name **declared** fields, the host resolves them against that plugin's own manifest and builds the statement, and every value is bound as a parameter — so this adds no injection surface over what `SchemaStore` already had. Values are read against the field's declared type, so a malformed one is a **400** rather than a driver error. Access is the same `data.readableBy` floor as the doc surface, and there is no `USER` exemption to make here because schema tables are per plugin and these paths carry no scope. An undeclared **entity** is a **404** (over HTTP it is a path segment, i.e. an address); an undeclared **field**, an unreadable value, or `search` on a field that is not `:fulltext` is a **400**. Paging follows the doc surface (`page` from 0, `size` 50, capped at 200).
+  A query is *described*, never written: `where=field:op:value` and `orderBy=field:asc|desc` name **declared** fields, the host resolves them against that plugin's own manifest and builds the statement, and every value is bound as a parameter — so this adds no injection surface over what `SchemaStore` already had. Values are read against the field's declared type, so a malformed one is a **400** rather than a driver error. Access is `storage.schemaReadableBy` when declared, otherwise the same `data.readableBy` floor as the doc surface (platformApi 0.19.0) — so a plugin whose tile is anonymous can keep per-user rows, or rows naming a quiet episode, from anonymous visitors, the reasoning that gave `blobs` its own floor. It gates all four paths alike. There is no `USER` exemption to make here because schema tables are per plugin and these paths carry no scope. An undeclared **entity** is a **404** (over HTTP it is a path segment, i.e. an address); an undeclared **field**, an unreadable value, or `search` on a field that is not `:fulltext` is a **400**. Paging follows the doc surface (`page` from 0, `size` 50, capped at 200).
 - **No schema writes over HTTP, and this shapes plugin design.** A v1 plugin authors no routes (§7.4), so no plugin code runs at request time — there is nowhere to enforce slug uniqueness, append a revision atomically, or reject malformed input. Exposing writes would hand clients direct row access with *no plugin code in the path*, which is worse than the doc store's position rather than better. The plugin's **backend stays the only writer of relational truth**: a frontend that must write puts a document in the doc store and the backend ingests it on its schedule. The consequence is that such a write is **eventually consistent** — an editor does not see its own save through `ctx.schema` until the next tick, and a plugin with an editing UI (the wiki) must design for that with an optimistic render or an explicit saving state. Changing this needs a request-time plugin hook, which is a v1-contract decision and not a gap to be filled quietly.
 - **Not rate-limited.** `GET /api/plugins/**` is outside the rate limiter, which covers auth and upload paths, so an anonymous full-text search is capped only by `size`. Same posture as the doc-store list endpoint — but full-text is more expensive per call, so an operator exposing a large corpus should expect to front it.
 
@@ -670,7 +687,27 @@ Core owns what it stored: identities, tokens, listening progress, and the `USER`
 - **Outstanding erasures are retried and visible in admin**, and settle immediately when a switched-off plugin is switched back on. A plugin that is *rejected* is asked only if it has ever stored anything: it did not run this boot, but "rejected" is also what a working plugin becomes after a bad upgrade, and last week's rows do not disappear because a manifest stopped parsing.
 - **The API answers a receipt, not a 204** — complete, plus the plugins that have not finished. Reporting completion while a plugin still holds data would be the failure the whole record exists to prevent.
 
-`exportUser` is defaulted to empty so erasure could ship alone; the GDPR **data export** on the v2 roadmap hits the same wall and is meant to hang off the same code.
+`exportUser` was defaulted to empty so erasure could ship alone; the data export below hangs off the same code.
+
+#### 12.8.1 Data export
+A person can download everything the site holds about them (GDPR Art. 15 access, Art. 20 portability), including what every plugin holds, in a form that is useful to them — so a plugin hands over **files in its own format**, not a map core has to guess a format for.
+
+- **A job, not a response.** `POST /api/me/export` answers a **receipt** (`202`); the work runs off the request, because asking every plugin with a timeout each is not something a request should wait on. One export per account per interval (default a day, operator-configurable): an export walks every plugin, and a button pressed in a loop should not.
+- **Done means told.** When it finishes the person gets an in-app notification (§17) with a link to their account page, and the download is **one ZIP**, available only to that account and only for a limited time (default seven days), after which it is deleted. Admins see the jobs and each plugin's outcome — **never the ZIPs**: the point of the archive is that it is everything about one person.
+- **The layout:**
+  ```text
+  export-<date>.zip
+    README.txt                        what each part is, generated
+    core/account.json                 account, linked providers, name history, access tokens (never a secret)
+    core/listening.json               listening progress
+    core/notifications.json           the inbox
+    core/plugin-documents/<plugin>.json   USER-scope documents core holds on plugins' behalf (§7.6)
+    plugins/<id>/…                    whatever each plugin hands over, in its own format
+    outcome.json                      per plugin: complete | empty | failed | outstanding | not-supported
+  ```
+- **Plugins are asked the way erasure asks them, and nothing goes missing silently.** Every discovered plugin that could hold data gets an outcome **recorded before it is asked**. The order is the SDK's: `exportFiles` first; if that is empty, `exportUser`, whose non-empty map is written as `plugins/<id>/data.json`; if that is empty too the plugin holds nothing on this person (`empty`). A switched-off plugin, or a rejected one that has stored data (§12.8), cannot be asked and is **`outstanding`**; a handler that throws, runs past `UserExport.TIMEOUT` or hands over more than `UserExport.MAX_BYTES` is **`failed`** — never truncated, because a partial part reads as a complete one. A plugin with no `UserDataHandler` is **`not-supported`** rather than `empty`: core cannot know it holds nothing, only that it did not say. The limits are the SDK's constants; an operator may lower them, never raise them. A plugin includes only this person's data, which the SDK tells it.
+- **Erasure takes the exports with it.** An archive of a deleted account is that account's data outliving it.
+- **Not here:** an admin full-site export (that is database tooling), and import — a plugin that wants a round trip reads its own format back itself.
 
 ## 13. Non-Functional
 
@@ -699,7 +736,7 @@ The contract ships its test doubles. Production plugin code does **not** bundle 
 ## 14. Version Roadmap
 
 - **v1:** RSS feeds, unified feed + filter, season, EpisodeRef/snapshot, PLANNED lifecycle, social login (Discord) + account merging, RBAC, SiteConfig/branding + theming/seed, BlobStore (Postgres), plugin system, sequential nav + RelatedProvider (tags/season/fuzzy), plugins: **bingo, stats, wiki**.
-- **v2:** Patreon (login/FeedSource/tier), tier gating, **feed ownership** (below), dedup/merge UI (fuzzy), logo→theme stage 2, embedding-related (`pgvector`), transcript display (MAT transcripts are already uploaded — accessibility + SEO nearly for free), Podcasting 2.0 namespace (`<podcast:chapters/transcript/funding>`), first-party cookieless analytics, GDPR data export, oEmbed embed player, **external services** (§16: translation shipped first, with transcription/TTS/embeddings the follow-on kinds the surface is shaped for).
+- **v2:** Patreon (login/FeedSource/tier), tier gating, **feed ownership** (below), dedup/merge UI (fuzzy), logo→theme stage 2, embedding-related (`pgvector`), transcript display (MAT transcripts are already uploaded — accessibility + SEO nearly for free), Podcasting 2.0 namespace (`<podcast:chapters/transcript/funding>`), first-party cookieless analytics, oEmbed embed player, **external services** (§16: translation shipped first, with transcription/TTS/embeddings the follow-on kinds the surface is shaped for).
 - **v3:** Redis sessions/cache, multiple LB instances, multi-tenant preparation; far future: native audio host (BlobStore `audio/*` → S3, own FeedSource, custom RSS).
 
 **Feed ownership (v2).** A `Feed` has no owner, and **PODCASTER** is a single global role (§8.5): every podcaster can edit every feed, and — because the plugin doc store authorizes per plugin rather than per document (§7.6) — tamper with plugin data on any feed, season or episode. On a single-podcaster install that is invisible. The moment there are two, it is one tenant reaching another's, with no way to express the boundary.
