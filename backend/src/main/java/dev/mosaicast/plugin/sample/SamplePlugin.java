@@ -519,13 +519,20 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         // either screen said so. Handing over the *reading* of the period instead lets the host re-read it
         // before every tick and reschedule when the answer differs, so an edit lands within one old period.
         ctx.onSchedule(() -> refreshInterval(ctx), () -> recomputeHighlightStats(ctx, null));
-        // SDK 0.18.0. A highlight prepared for a quiet planned episode is left out of everything public until
-        // the episode is (see isQuiet). When it is released, recompute at once rather than up to an interval
-        // later, so the page, the search index and the favourite counts catch up with the episode page.
-        // Best effort by contract — not durable, not replayed, not fired for an announcement, which is the
-        // clock passing and writes nothing — so the schedule above stays the path that guarantees it.
-        ctx.onEpisodeReleased(slug -> {
-            ctx.logger().info("episode {} released; recomputing so its highlight is listed", slug);
+        // SDK 0.19.0. Everything this backend publishes leaves a quiet planned episode out (see isQuiet), so
+        // any write that moves an episode's phase changes what it should publish: an announcement lists it, an
+        // announcement moved later or a withdrawal must un-list it, a cancellation (phase null) drops it. The
+        // second kind is the one that cannot wait for the schedule — until the next pass the public `index`
+        // and `stats` docs would keep naming an episode the site is hiding again (SDK#98).
+        //
+        // One hook, not two. A release fires onEpisodeReleased and then this one with RELEASED, so 2.19.0's
+        // release-hook recompute would now run twice per release for the same answer; this listener sees
+        // every write-driven change, release included. What neither hook sees is the clock (PLANNED ->
+        // UPCOMING as an announcement passes), which only makes an episode *more* visible — the schedule
+        // above reconciles it, and both hooks are best effort by contract anyway.
+        ctx.onEpisodePhaseChanged((slug, phase) -> {
+            ctx.logger().info("episode {} is now {}; recomputing what is published about it", slug,
+                    phase == null ? "cancelled" : phase);
             recomputeHighlightStats(ctx, null);
         });
     }
@@ -575,8 +582,8 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      *                       a whole recompute is the honest answer to an account deletion
      */
     private static void recomputeHighlightStats(PluginContext ctx, UUID excludedUserId) {
-        // One pass at a time. The schedule never overlaps itself, but the release listener runs on a host
-        // thread of its own (SDK 0.18.0) and eraseUser on another — and two concurrent passes would both read
+        // One pass at a time. The schedule never overlaps itself, but the phase listener runs on a host
+        // thread of its own (SDK 0.19.0) and eraseUser on another — and two concurrent passes would both read
         // `announced` before either wrote it, telling a listener about the same translation twice.
         synchronized (RECOMPUTE_LOCK) {
             recomputeHighlightStatsLocked(ctx, excludedUserId);

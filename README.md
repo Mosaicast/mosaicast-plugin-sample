@@ -845,9 +845,10 @@ Three properties the code depends on:
 - **Read it live, cache per render and never per install.** The snapshot is overwritten on every feed
   refetch. That is the feature: a podcaster's title edit propagates.
 
-`displayMany` clamps at `DISPLAY_BATCH_LIMIT` (200) rather than failing, so the extras are simply absent —
-indistinguishable from "filtered out". Since core 0.7.6 `ctx.episodes` is the whole scope rather than its
-first 200, so `shell-filter.ts`'s `displayAll` asks in batches of the limit.
+`displayMany` takes any number of slugs: past `DISPLAY_BATCH_LIMIT` (200) the client splits the call and
+merges the answers (SDK 0.19.0). It used to clamp, leaving the extras absent and indistinguishable from
+"filtered out", and since core 0.7.6 `ctx.episodes` really can be longer — so `shell-filter.ts` carried a
+batching helper of its own until 2.20.0.
 
 **Where an episode sits is authoritative (SDK 0.17.0).** `feed`, `season` and `episodeNo` on a snapshot come
 from the identity layer, not the feed's presentation, so the cards say "S2 · E14" from them — and the site
@@ -877,11 +878,14 @@ Three things worth copying:
 - **Ask per request.** The phase is derived from the clock and moves with nothing written: an announcement
   passing makes it `UPCOMING`, and a podcaster moving `announceAt` later makes it quiet again. The sitemap,
   OG, `hasRoute` and search check it on every call. What is published on the schedule (`index`, `stats`) can
-  lag by one interval. The page hides such an entry anyway, since the host's snapshot batch answers without
-  it. The raw doc does not, and nothing tells the plugin to recompute (SDK#98).
-- **The release hook is a shortcut.** `onEpisodeReleased` recomputes so a prepared highlight is listed when
-  the feed item binds, but the event is best effort, so the schedule still reconciles. Both may handle one
-  release, so the recompute is serialised.
+  lag by one interval — for an announcement passing, which is harmless. Going quiet again is a write, and
+  the phase hook recomputes on it.
+- **Recompute on the phase hook, reconcile on the schedule.** `onEpisodePhaseChanged` (SDK 0.19.0) fires
+  for every *write* that moves a phase: announce, `announceAt` edits either way, release, withdrawal, cancel
+  (`null`). It recomputes, so a quiet-again episode leaves `index`/`stats` at once. The clock moving PLANNED →
+  UPCOMING fires nothing; that only makes an episode *more* visible, and the schedule picks it up. The hook is
+  best effort, so the schedule still reconciles, and recomputes are serialised. (2.19.0 used
+  `onEpisodeReleased` here; a release now reaches the phase hook too, so that one went.)
 
 Verified on a named core 0.7.7 instance: quiet → seven anonymous surfaces silent; announced → sitemap, page,
 OG and episode doc live at once; pushed back → silent again at once; feed item bound → hook fired, listed.
@@ -1434,6 +1438,22 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.20.0** — SDK **0.19.0**, hosted by core **0.8.0** (which rejects every 0.18 plugin).
+  - **A write that changes an episode's phase recomputes at once** (`onEpisodePhaseChanged`). An announced
+    episode pushed back to quiet, a withdrawal and a cancellation (phase `null`) now leave the public
+    `index`/`stats` docs straight away, not on the next pass. That closes the gap 2.19.0 shipped with (SDK#98).
+    The hook also replaces 2.19.0's `onEpisodeReleased` recompute: a release reaches it as `RELEASED`, so
+    keeping both would recompute twice per release.
+  - **`drafts` and `announced` get a podcaster read floor** (`data.keyFloors`). `backendOwned` only ever
+    governed writes, so unreviewed machine translations and announcement bookkeeping were readable by anyone.
+    The editor that offers drafts is a podcaster's and still reads them. A visitor gets a 403 with the
+    `key-floor` problem type.
+  - **`displayAll` is gone**: `ctx.feeds.displayMany` splits past 200 itself.
+  - **The "Not announced" chip shows** in the podcaster's to-write list now that core puts quiet plans in a
+    podcaster's `ctx.episodes` (core#258).
+  - **GDPR export (core 0.8.0):** unchanged on purpose. A list of favourite marks has no format of its own, so
+    `exportUser`'s map is the right shape, and the host writes it as `plugins/sample/data.json`. `exportFiles`
+    is for data a person would open in another tool. A test pins the host's ask order.
 - **2.19.0** — SDK **0.18.0**, hosted by core **0.7.7**. Core 0.7.7 lets a podcaster plan an episode
   **quietly** — visible to podcasters and admins only until it is announced — and rejects every 0.17 plugin.
   - **Nothing public names a quiet episode.** A backend sees planned episodes (that is when content is

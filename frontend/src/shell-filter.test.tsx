@@ -96,7 +96,7 @@ describe('useShellFilteredEpisodes', () => {
     expect(seen.last).toEqual({ state: 'ready', slugs: ['b'] });
   });
 
-  it('asks for snapshots in batches, so a show past the batch limit keeps its tail', async () => {
+  it('keeps the tail of a show past the batch limit — the SDK splits the call (0.19.0)', async () => {
     const slugs = Array.from({ length: DISPLAY_BATCH_LIMIT + 5 }, (_, i) => `ep-${i}`);
     const feeds = makeMockFeeds();
     const last = slugs[slugs.length - 1];
@@ -106,6 +106,7 @@ describe('useShellFilteredEpisodes', () => {
 
     expect(seen.last).toEqual({ state: 'ready', slugs: [last] });
     expect(feeds.requested).toHaveLength(slugs.length);
+    expect(feeds.batches).toHaveLength(2);
   });
 
   it('narrows by tag through ctx.tags', async () => {

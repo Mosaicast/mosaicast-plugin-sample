@@ -15,7 +15,6 @@ import { marked } from 'marked';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
 import { FallbackImg, hideFailedImages } from '../images';
-import { displayAll } from '../shell-filter';
 import { DETAIL_PREFIX, PAGE_ENTRIES, PAGE_PATTERNS } from '../page-entries';
 import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { HighlightTags } from './HighlightTags';
@@ -100,9 +99,8 @@ function internalLink(route: PluginRoute, subpath: string) {
  *   that is the feature: a podcaster's title edit propagates. Storing a copy re-creates the staleness this
  *   surface exists to remove.
  *
- * Beyond `DISPLAY_BATCH_LIMIT` slugs the host clamps rather than failing, and since core 0.7.6
- * `ctx.episodes` can be longer than that — so {@link displayAll} asks in batches. Before, the tail of a long
- * show was absent here, indistinguishable from "filtered out".
+ * Past `DISPLAY_BATCH_LIMIT` slugs the client splits the call and merges the answers (SDK 0.19.0); it used
+ * to clamp, which left the tail of a long show absent here, indistinguishable from "filtered out".
  */
 function useEpisodeDisplays(
   ctx: PluginContext,
@@ -115,7 +113,8 @@ function useEpisodeDisplays(
   useEffect(() => {
     const wanted = key ? key.split(',') : [];
     if (wanted.length === 0) return;
-    displayAll(ctx, wanted)
+    ctx.feeds
+      .displayMany(wanted)
       .then((answer) => {
         setDisplays(answer);
         setAnswered(true);

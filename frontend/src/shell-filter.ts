@@ -3,29 +3,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
-  DISPLAY_BATCH_LIMIT,
   type DisplaySnapshot,
   type FilterState,
   type PluginContext,
 } from '@mosaicast/plugin-sdk';
-
-/**
- * Every snapshot for `slugs`, in {@link DISPLAY_BATCH_LIMIT}-sized calls.
- *
- * `displayMany` **clamps** past the limit rather than failing, and since core 0.7.6 `ctx.episodes` is the
- * whole scope rather than its first 200 — so a single call over it would quietly leave the long tail of a
- * long-running show without a snapshot, which every caller treats as "filtered out". A slug the host
- * filtered (withdrawn, tier-gated) is still simply absent from the result.
- */
-export async function displayAll(
-  ctx: PluginContext,
-  slugs: string[],
-): Promise<Record<string, DisplaySnapshot>> {
-  const batches: string[][] = [];
-  for (let i = 0; i < slugs.length; i += DISPLAY_BATCH_LIMIT) batches.push(slugs.slice(i, i + DISPLAY_BATCH_LIMIT));
-  const answers = await Promise.all(batches.map((batch) => ctx.feeds.displayMany(batch)));
-  return Object.assign({}, ...answers);
-}
 
 /** Whether the shell's filter narrows or orders anything — `{}` (and core 0.7.5 and older) does neither. */
 export function isFiltered(filter: FilterState): boolean {
@@ -118,7 +99,9 @@ export function useShellFilteredEpisodes(ctx: PluginContext, enabled = true): Sh
     const tags = filter.tags ?? [];
     const tagsClient = ctx.tags;
     Promise.all([
-      needsDisplays ? displayAll(ctx, slugs) : Promise.resolve({}),
+      // One call for the whole scope: `displayMany` splits past `DISPLAY_BATCH_LIMIT` itself since SDK 0.19.0
+      // (it used to clamp, and this file carried a batching helper of its own to make up for it).
+      needsDisplays ? ctx.feeds.displayMany(slugs) : Promise.resolve({}),
       tags.length === 0
         ? Promise.resolve(null)
         : tagsClient

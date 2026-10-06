@@ -10,6 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
+import dev.mosaicast.plugin.api.ExportFile;
+import dev.mosaicast.plugin.api.UserExport;
+import dev.mosaicast.plugin.api.FeedAccess;
 import dev.mosaicast.plugin.api.EpisodePhase;
 import dev.mosaicast.plugin.api.OgMeta;
 import dev.mosaicast.plugin.api.Role;
@@ -43,6 +46,8 @@ import dev.mosaicast.plugin.testkit.SitemapProviderHarness;
 import dev.mosaicast.plugin.testkit.UserDataHandlerHarness;
 import java.io.ByteArrayInputStream;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1007,6 +1012,26 @@ class SamplePluginTest {
     }
 
     @Test
+    void landsInThePersonsArchiveAsDataJsonBecauseAListOfMarksHasNoFormatOfItsOwn() {
+        // SDK 0.19.0 added exportFiles for data with a format of its own — a card a bingo import reads back, a
+        // photo. A list of favourite marks has none, so this plugin keeps the Map form and the host writes it
+        // as `plugins/sample/data.json`. Asked the way the host asks: exportFiles first, then exportUser.
+        FakeFeedAccess feeds = released("the-kraken");
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                .withReadsAllUsers();
+        UUID visitor = UUID.randomUUID();
+        ctx.store().asUser(visitor).put(Scope.user(), "fav:the-kraken", true);
+        plugin.register(ctx);
+
+        UserExport part = new UserDataHandlerHarness(plugin).exportFiles(visitor.toString()).orElseThrow();
+
+        assertEquals(List.of("data.json"), part.files().stream().map(ExportFile::path).toList());
+        assertTrue(new String(part.files().get(0).bytes(), StandardCharsets.UTF_8).contains("the-kraken"));
+        assertEquals(Optional.empty(), new UserDataHandlerHarness(plugin).exportFiles(UUID.randomUUID().toString()),
+                "somebody who marked nothing has no part at all — not an empty file");
+    }
+
+    @Test
     void exportsNothingForAVisitorWhoMarkedNothing() {
         FakePluginContext ctx = contextWithEpisodes(new MapPluginConfig(), "ep-1");
         plugin.register(ctx);
@@ -1561,13 +1586,16 @@ class SamplePluginTest {
     void listsAPreparedHighlightAsSoonAsItsEpisodeIsReleased() {
         FakePluginContext ctx = oneQuietOneReleased();
         plugin.register(ctx);
-        assertEquals(1, ctx.episodeReleasedListenerCount());
+        // One hook (SDK 0.19.0): a release reaches the phase listener as RELEASED, so a release listener as
+        // well would only recompute the same answer twice.
+        assertEquals(1, ctx.episodePhaseListenerCount());
+        assertEquals(0, ctx.episodeReleasedListenerCount());
 
         ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.RELEASED);
-        ctx.fireEpisodeReleased("ep-2");
+        ctx.fireEpisodePhaseChanged("ep-2", EpisodePhase.RELEASED);
 
-        // Not an interval later: the release hook recomputes. The schedule would get there too, which is
-        // what makes the hook — best effort by contract — safe to rely on as a shortcut only.
+        // Not an interval later: the hook recomputes. The schedule would get there too, which is what makes
+        // the hook — best effort by contract — safe to rely on as a shortcut only.
         assertEquals(List.of("ep-1", "ep-2"), ctx.store().get(Scope.site(), "index", HighlightIndex.class)
                 .orElseThrow().entries().stream().map(IndexEntry::slug).toList());
     }
@@ -1587,10 +1615,77 @@ class SamplePluginTest {
                 ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
 
         ((FakeFeedAccess) ctx.feeds()).withPhase("ep-1", EpisodePhase.RELEASED);
-        ctx.fireEpisodeReleased("ep-1");
+        ctx.fireEpisodePhaseChanged("ep-1", EpisodePhase.RELEASED);
 
         assertEquals(List.of(), out[0].messagesFor(ana));
         assertEquals(Optional.of(new AnnouncedLocales(Set.of("de"))),
                 ctx.store().get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+    }
+
+    @Test
+    void unlistsAnEpisodeTheMomentItGoesQuietAgain() {
+        // SDK#98, closed by 0.19.0's phase hook. An announced episode whose announcement a podcaster moves
+        // later is PLANNED again with nothing written to this plugin — and until 2.20.0 the public `index`
+        // and `stats` docs kept naming it until the next scheduled pass.
+        FakePluginContext ctx = oneQuietOneReleased();
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.UPCOMING);
+        plugin.register(ctx);
+        assertEquals(List.of("ep-1", "ep-2"), indexedSlugs(ctx));
+
+        ((FakeFeedAccess) ctx.feeds()).withPhase("ep-2", EpisodePhase.PLANNED);
+        ctx.fireEpisodePhaseChanged("ep-2", EpisodePhase.PLANNED);
+
+        assertEquals(List.of("ep-1"), indexedSlugs(ctx));
+        assertEquals(1, ctx.store().get(Scope.site(), "stats", HighlightStats.class).orElseThrow().totalEpisodes());
+    }
+
+    @Test
+    void dropsACancelledPlanFromTheListing() {
+        // Cancelling deletes the episode and its episode-scoped docs; the site-scope listing is ours to fix.
+        FeedAccessWithRemoval feeds = new FeedAccessWithRemoval("ep-1", "ep-2");
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                .withReadsAllUsers();
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the lighthouse"));
+        ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("announced, then cancelled"));
+        plugin.register(ctx);
+        assertEquals(List.of("ep-1", "ep-2"), indexedSlugs(ctx));
+
+        feeds.remove("ep-2");
+        ctx.store().delete(Scope.episode("ep-2"), "highlight");
+        ctx.fireEpisodePhaseChanged("ep-2", null);
+
+        assertEquals(List.of("ep-1"), indexedSlugs(ctx));
+    }
+
+    private static List<String> indexedSlugs(FakePluginContext ctx) {
+        return ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow()
+                .entries().stream().map(IndexEntry::slug).toList();
+    }
+
+    /** A site whose episode list can lose one — what a cancelled plan is. {@link FakeFeedAccess}'s is fixed. */
+    private static final class FeedAccessWithRemoval implements FeedAccess {
+        private final List<String> slugs;
+
+        FeedAccessWithRemoval(String... slugs) {
+            this.slugs = new ArrayList<>(List.of(slugs));
+        }
+
+        void remove(String slug) {
+            slugs.remove(slug);
+        }
+
+        @Override
+        public List<String> episodesIn(Scope scope) {
+            return List.copyOf(slugs);
+        }
+
+        @Override
+        public DisplaySnapshot display(String refId) {
+            if (!slugs.contains(refId)) {
+                throw new IllegalArgumentException("no such episode: " + refId);
+            }
+            return new DisplaySnapshot(refId, null, null, null, null, null, null, null, null, "", null, null, null,
+                    EpisodePhase.RELEASED, null);
+        }
     }
 }
