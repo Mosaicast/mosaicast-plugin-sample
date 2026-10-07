@@ -4,10 +4,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   PLATFORM_API_VERSION,
+  PROBLEM_TYPES,
   defineManifest,
   matchRoute,
   type PluginManifest,
 } from '@mosaicast/plugin-sdk';
+import { makeMockDocs } from '@mosaicast/plugin-sdk/testing';
 import rawManifest from '../../plugin.json';
 import { DETAIL_PREFIX, PAGE_ENTRIES, PAGE_PATTERNS } from './page-entries';
 import { ICON_NAMES } from './icons';
@@ -166,6 +168,30 @@ describe('nav entries — the manifest and the page agree', () => {
     const labels = manifest.consent?.categoryLabels ?? {};
     expect(Object.keys(labels)).toEqual(['social']);
     expect(labels.social?.label).toMatchObject({ en: expect.any(String), de: expect.any(String) });
+  });
+
+  it('keeps the backend’s private bookkeeping from visitors, beside the public numbers (SDK 0.19.0)', async () => {
+    // `drafts` is machine translation no human has read — the contract's own rule is that it is a draft — and
+    // `announced` is which languages were already told to whom. Both sat at the plugin's anonymous read floor
+    // until `keyFloors`; `backendOwned` only ever governed the write. Driven through the SDK's floor-enforcing
+    // double with this manifest's own `data` block, so the test fails if the declaration drifts.
+    const data = manifest.data!;
+    const seeded = {
+      'data/episode/ep-1/drafts': { drafts: [] },
+      'data/episode/ep-1/announced': { locales: ['de'] },
+      'data/episode/ep-1/highlight': { markdown: 'public' },
+    };
+    const fan = makeMockDocs(seeded, { data, viewer: 'fan' });
+    for (const key of ['drafts', 'announced']) {
+      await expect(fan.get({ type: 'episode', id: 'ep-1' }, key)).rejects.toMatchObject({
+        status: 403,
+        problem: { type: PROBLEM_TYPES.keyFloor },
+      });
+    }
+    await expect(fan.get({ type: 'episode', id: 'ep-1' }, 'highlight')).resolves.toEqual({ markdown: 'public' });
+    // The editor that offers the drafts is a podcaster's, and still reads them.
+    const podcaster = makeMockDocs(seeded, { data, viewer: 'podcaster' });
+    await expect(podcaster.get({ type: 'episode', id: 'ep-1' }, 'drafts')).resolves.toEqual({ drafts: [] });
   });
 
   it('never offers the detail route as an entrance', () => {

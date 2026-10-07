@@ -6,6 +6,7 @@ package dev.mosaicast.plugin.sample;
 import dev.mosaicast.plugin.api.BlobInfo;
 import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
+import dev.mosaicast.plugin.api.EpisodePhase;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.LocaleInfo;
 import dev.mosaicast.plugin.api.NotificationException;
@@ -518,6 +519,22 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         // either screen said so. Handing over the *reading* of the period instead lets the host re-read it
         // before every tick and reschedule when the answer differs, so an edit lands within one old period.
         ctx.onSchedule(() -> refreshInterval(ctx), () -> recomputeHighlightStats(ctx, null));
+        // SDK 0.19.0. Everything this backend publishes leaves a quiet planned episode out (see isQuiet), so
+        // any write that moves an episode's phase changes what it should publish: an announcement lists it, an
+        // announcement moved later or a withdrawal must un-list it, a cancellation (phase null) drops it. The
+        // second kind is the one that cannot wait for the schedule — until the next pass the public `index`
+        // and `stats` docs would keep naming an episode the site is hiding again (SDK#98).
+        //
+        // One hook, not two. A release fires onEpisodeReleased and then this one with RELEASED, so 2.19.0's
+        // release-hook recompute would now run twice per release for the same answer; this listener sees
+        // every write-driven change, release included. What neither hook sees is the clock (PLANNED ->
+        // UPCOMING as an announcement passes), which only makes an episode *more* visible — the schedule
+        // above reconciles it, and both hooks are best effort by contract anyway.
+        ctx.onEpisodePhaseChanged((slug, phase) -> {
+            ctx.logger().info("episode {} is now {}; recomputing what is published about it", slug,
+                    phase == null ? "cancelled" : phase);
+            recomputeHighlightStats(ctx, null);
+        });
     }
 
     /**
@@ -565,7 +582,51 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      *                       a whole recompute is the honest answer to an account deletion
      */
     private static void recomputeHighlightStats(PluginContext ctx, UUID excludedUserId) {
+        // One pass at a time. The schedule never overlaps itself, but the phase listener runs on a host
+        // thread of its own (SDK 0.19.0) and eraseUser on another — and two concurrent passes would both read
+        // `announced` before either wrote it, telling a listener about the same translation twice.
+        synchronized (RECOMPUTE_LOCK) {
+            recomputeHighlightStatsLocked(ctx, excludedUserId);
+        }
+    }
+
+    /** Serialises {@link #recomputeHighlightStats(PluginContext, UUID)}; see there. */
+    private static final Object RECOMPUTE_LOCK = new Object();
+
+    /**
+     * Whether {@code slug} is a planned episode nobody below podcaster may know about yet (SDK 0.18.0).
+     *
+     * <p><strong>A backend sees quiet episodes; visitors must not.</strong> {@code episodesIn} hands this plugin
+     * every planned episode, phase included, because that is when content gets prepared for one — and every
+     * public thing this backend derives from that list ({@code index}, {@code stats}, the sitemap, OpenGraph
+     * tags, {@code hasRoute}, search hits) would otherwise name an episode the site itself is hiding, with its
+     * title and the podcaster's prose attached. The host cannot filter what it cannot see inside.
+     *
+     * <p>Asked <strong>per use, never cached</strong>: the phase is derived from the clock and moves with
+     * nothing written — {@code UPCOMING} when the announcement passes, and back to {@code PLANNED} if a
+     * podcaster moves the announcement later. Only {@code PLANNED} is quiet; an {@code UPCOMING} card is
+     * public, and a {@code null} phase is a host older than 0.18, where nothing was quiet.
+     */
+    static boolean isQuiet(PluginContext ctx, String slug) {
+        try {
+            return ctx.feeds().display(slug).phase() == EpisodePhase.PLANNED;
+        } catch (RuntimeException e) {
+            // An episode that dropped out between listing and display. Unknown is not public.
+            return true;
+        }
+    }
+
+    private static void recomputeHighlightStatsLocked(PluginContext ctx, UUID excludedUserId) {
         List<String> episodeIds = ctx.feeds().episodesIn(Scope.site());
+        // The quiet ones are walked like any other — their highlight is pruned, its image kept and its
+        // translations drafted, since preparing is the point of a planned episode — and left out of
+        // everything a visitor can read: the counts, the listing, the tag mirror and the announcements.
+        Set<String> quiet = new HashSet<>();
+        for (String id : episodeIds) {
+            if (isQuiet(ctx, id)) {
+                quiet.add(id);
+            }
+        }
         Map<String, List<UUID>> favourites = tallyFavourites(ctx, excludedUserId);
         // Every blob ref a highlight still points at, gathered as we already walk the docs. Feeding the
         // sweep from the same pass is what keeps the two consistent: a ref added between "collect" and
@@ -596,6 +657,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         // this one, and the page would then list an episode whose highlight this pass just pruned.
         List<IndexEntry> index = new ArrayList<>();
         for (String id : episodeIds) {
+            boolean isPublic = !quiet.contains(id);
             List<UUID> favouriters = favourites.getOrDefault(id, List.of());
             totalFavourites += publishFavouriteCount(ctx, id, favouriters.size());
             boolean hasHighlight = false;
@@ -625,13 +687,15 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                             id, removed);
                     continue;
                 }
-                highlighted++;
-                hasHighlight = true;
-                Integer moment = node.path("momentSeconds").isNumber() ? node.path("momentSeconds").asInt() : null;
-                if (moment != null) {
-                    withMoment++;
-                }
                 rememberImageRef(node, referencedImages);
+                Integer moment = node.path("momentSeconds").isNumber() ? node.path("momentSeconds").asInt() : null;
+                if (isPublic) {
+                    highlighted++;
+                    hasHighlight = true;
+                    if (moment != null) {
+                        withMoment++;
+                    }
+                }
 
                 // SDK 0.10.0 — the translations the podcaster has actually written, checked against the
                 // site's content locales rather than believed. **These keys are client input**: they sit
@@ -670,7 +734,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 // `containsAll` answers true for every episode, so the figure would read "every highlight is
                 // translated into every language" — technically accurate, and a claim about a thing that does
                 // not exist. Zero is the honest answer where there is nothing to translate into.
-                if (!translatable.isEmpty() && written.keySet().containsAll(translatable)) {
+                if (isPublic && !translatable.isEmpty() && written.keySet().containsAll(translatable)) {
                     fullyTranslated++;
                 }
                 draftBudget = draftTranslations(ctx, id, markdown.stringValue(), written, contentLocales, defaultLocale,
@@ -680,6 +744,12 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 // a page nobody can render is worse than none. Runs after drafting deliberately: drafts are
                 // suggestions nobody has read, and there is nothing to tell a listener about until a human
                 // has saved one into the highlight itself.
+                if (!isPublic) {
+                    // Nothing to tell anybody about an episode they cannot open — and nothing recorded either,
+                    // so the first public pass seeds `announced` from what is there by then rather than
+                    // announcing everything written while it was being prepared.
+                    continue;
+                }
                 if (announceBudget > 0) {
                     int sent = announceTranslations(ctx, id, written.keySet(), favouriters);
                     if (sent < 0) {
@@ -710,10 +780,10 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                 "recomputed highlight stats: {}/{} episodes highlighted ({} with a key moment, {} empty doc(s) pruned,"
                         + " {} favourite(s) across all visitors, {} translated into every content language,"
                         + " {} stranded translation(s), {} listener(s) told about a new translation)",
-                highlighted, episodeIds.size(), withMoment, pruned, totalFavourites, fullyTranslated, stranded,
+                highlighted, episodeIds.size() - quiet.size(), withMoment, pruned, totalFavourites, fullyTranslated, stranded,
                 announced);
         ctx.store().put(Scope.site(), "stats",
-                new HighlightStats(episodeIds.size(), highlighted, withMoment, totalFavourites, fullyTranslated,
+                new HighlightStats(episodeIds.size() - quiet.size(), highlighted, withMoment, totalFavourites, fullyTranslated,
                         stranded));
         // Published after the prune above, so a doc removed in this pass never appears in the listing.
         ctx.store().put(Scope.site(), "index", new HighlightIndex(index));
@@ -1224,11 +1294,17 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * "publishable" is what put contentless episodes into {@code sitemap.xml} with an empty OpenGraph
      * description. {@link #recomputeHighlightStats(PluginContext)} prunes such docs, but only on its
      * schedule — these two run per request and must not depend on that having happened yet.
+     *
+     * <p>And only if the episode is public (SDK 0.18.0): a highlight prepared for a quiet planned episode is
+     * not published by a sitemap entry, an OpenGraph card or a {@code hasRoute} answer — each would name an
+     * episode the site is hiding. Checked here, per request, because the phase moves with the clock; see
+     * {@link #isQuiet(PluginContext, String)}.
      */
     private static Optional<Highlight> publishableHighlight(PluginContext ctx, String slug) {
         return ctx.store()
                 .get(Scope.episode(slug), "highlight", Highlight.class)
-                .filter(highlight -> highlight.markdown() != null && !highlight.markdown().isBlank());
+                .filter(highlight -> highlight.markdown() != null && !highlight.markdown().isBlank())
+                .filter(highlight -> !isQuiet(ctx, slug));
     }
 
     /**
@@ -1535,7 +1611,9 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
             }
             boolean inSlug = entry.slug().toLowerCase(Locale.ROOT).contains(needle);
             boolean inText = entry.excerpt() != null && entry.excerpt().toLowerCase(Locale.ROOT).contains(needle);
-            if (!inSlug && !inText) {
+            // The index is as old as the last pass, and an episode can have gone quiet since — a podcaster
+            // moving its announcement later (SDK 0.18.0). Checked per hit, so only for what matched.
+            if ((!inSlug && !inText) || isQuiet(ctx, entry.slug())) {
                 continue;
             }
             // A slug match is the stronger signal; this orders *this* section and nothing else.

@@ -15,6 +15,7 @@ import { Byline, useAuthors } from './Byline';
 import { TranslationEditor } from './TranslationEditor';
 import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { describeApiError } from '../api-error';
+import { isFiltered, useShellFilteredEpisodes } from '../shell-filter';
 import {
   FAVOURITE_COUNT_KEY,
   HIGHLIGHT_KEY,
@@ -117,7 +118,8 @@ function renderMarkdown(markdown: string, sanitize: PluginContext['sanitize']): 
  * - the **`user` storage scope** (SDK 0.5.0) — a signed-in visitor's own "favourite" mark, written to
  *   `data/user/me/fav:<episodeSlug>` and readable only by them. Its public tally comes back from a
  *   *different* doc the backend computes with `queryAcrossUsers` — see {@link favouriteDocPath}.
- * - `episode.status` — an "upcoming episode" badge while `PLANNED`.
+ * - `episode.phase` (0.18.0) — a "not announced yet" note to the podcaster preparing a quiet episode, and
+ *   an "upcoming episode" badge once it is announced. Never `status`, which cannot tell the two apart.
  * - `log` — sent on a saved/failed highlight edit, a manual spoiler reveal, a key-moment jump, and every
  *   consent request/grant/deny (inside {@link ConsentExtras}) — real signal from real user actions, not
  *   a demo-only call site.
@@ -177,6 +179,9 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   const [, forceFilterRerender] = useState(0);
   useEffect(() => ctx.filter.onChange(() => forceFilterRerender((n) => n + 1)), [ctx]);
   const season = ctx.filter.current().season;
+  // ...and live since core 0.7.6: the site tile's episode list follows the same season/tag/order the shell's
+  // own list does, which the host leaves to us — `ctx.episodes` is the whole scope whatever is filtered.
+  const browse = useShellFilteredEpisodes(ctx, isSite && !inDeepLink);
 
   // The site-wide look this plugin's own admin settings panel controls (see AdminSettings.tsx) — read
   // here so every scope (and the deep-link view) reflects it, since core has no generic config-admin UI
@@ -280,10 +285,12 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   // held back, and only until this visitor has actually started the episode (progress > 0s) — a courtesy,
   // not access control, so a manual "show anyway" is always available (ARCHITECTURE §6.5, bingo's pattern).
   const [revealed, setRevealed] = useState(false);
+  const phase = ctx.episode?.phase;
   useEffect(() => {
-    if (!isEpisode || ctx.episode?.status === 'PLANNED') return;
+    // Nothing to have listened to before release: no audio yet in either pre-release phase (SDK 0.18.0).
+    if (!isEpisode || phase === 'planned' || phase === 'upcoming') return;
     ctx.progress.get(ctx.scope.id).then((seconds) => setRevealed((seconds ?? 0) > 0));
-  }, [ctx, isEpisode]);
+  }, [ctx, isEpisode, phase]);
   const spoilerHidden = isEpisode && highlight?.spoiler === true && !revealed;
 
   // SDK 0.10.0 — which language this visitor actually gets, and what to tell them about it. Exact match on
@@ -658,7 +665,12 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         )}
       </div>
 
-      {isEpisode && ctx.episode?.status === 'PLANNED' && <p className="planned">{i18n.t('planned.badge')}</p>}
+      {/* Branch on the phase, never the stored status (SDK 0.18.0): a PLANNED episode is either quiet or
+          announced, and only the phase says which. Quiet: the shell already tells the podcaster who can see
+          the episode and until when, so this says only what the shell cannot know — what happens to the
+          highlight. Announced: everyone's "coming soon". The shell hands a new ctx when the phase moves. */}
+      {isEpisode && phase === 'planned' && <p className="planned">{i18n.t('planned.quiet')}</p>}
+      {isEpisode && phase === 'upcoming' && <p className="planned">{i18n.t('planned.badge')}</p>}
 
       {spoilerHidden ? (
         <div className="spoiler">
@@ -867,11 +879,15 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         </p>
       )}
 
-      {isSite && !inDeepLink && ctx.episodes.length > 0 && (
+      {isSite && !inDeepLink && browse.state !== 'loading' && (browse.slugs.length > 0 || isFiltered(ctx.filter.current())) && (
         <div className="browse">
           <h3 className="browseTitle">{i18n.t('browse.title')}</h3>
+          {/* Honest about a filter it could not apply: the list below is then the whole site while the page
+              around it is filtered, and silently showing it under a "filtered" note would be a lie. */}
+          {browse.state === 'unfiltered' && <p className="filterNote">{i18n.t('browse.unfiltered')}</p>}
+          {browse.slugs.length === 0 && <p className="filterNote">{i18n.t('browse.noneInFilter')}</p>}
           <ul>
-            {ctx.episodes.map((slug) => (
+            {browse.slugs.map((slug) => (
               <li key={slug}>
                 <a {...internalLink(ctx.route, `${DEEP_LINK_PREFIX}${encodeURIComponent(slug)}`)}>
                   {ctx.episodeLabels?.[slug] ?? slug}

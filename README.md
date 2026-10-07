@@ -74,7 +74,7 @@ gotcha](#a-pf4j-gotcha-that-core-fixed--and-the-workaround-this-plugin-carried-f
 |---|---|
 | `scope` | Addresses the doc store (`data/{scopeType}/{scopeId}/highlight`) and picks the i18n title. |
 | `episodes` / `episodeLabels` | Site scope renders a "browse highlighted episodes" index, linking each episode's public slug to its own deep link. |
-| `episode?.status` | An "Upcoming episode — no spoilers yet" badge while `PLANNED`. |
+| `episode?.phase` | New in 0.18.0, and the one to branch on — `status` cannot tell a quiet plan from an announced one. `planned`: a note to the podcaster preparing it that the highlight goes public with the episode (the shell itself says who can see it and until when). `upcoming`: everyone's "Upcoming episode — no spoilers yet". The spoiler gate stays off before release (no audio to have heard). See [quiet planned episodes](#quiet-planned-episodes-sdk-0180). |
 | `user` | Gates the **Edit** button to `podcaster`/`admin` (in addition to the slot's own `visibleTo`, which the settings panel relies on instead — see below). Also decides whether the favourite toggle is offered at all: an anonymous visitor has no `user` partition, so the component shows a sign-in hint instead of making a request the host would answer with 401. |
 | **the `user` storage scope** | New in 2.6.0 — a signed-in visitor's own "Favourited" mark at `data/user/me/fav:<episodeSlug>`, written with `ctx.api.put`/withdrawn with `ctx.api.delete`. `user` is a `DataScopeType`, **not** a slot scope: `ctx.scope` stays `episode`, only the storage address changes. The public tally beside it comes from a *different*, backend-written doc — see [below](#per-user-data-lives-in-a-scope-not-in-a-key-sdk-050). |
 | `api` | The raw client, kept **deliberately** at exactly one call site since 2.12.0: `AdminSettings.tsx` reads and writes the site settings doc through it (with `getOrNull`), so the reference plugin shows the surface underneath `ctx.docs` rather than only the sugar. It is the documented escape hatch and it did not go away — see [below](#ctxdocs-and-the-escape-hatch-underneath-it). |
@@ -82,7 +82,7 @@ gotcha](#a-pf4j-gotcha-that-core-fixed--and-the-workaround-this-plugin-carried-f
 | `feeds` | New in 0.9.0 — one batched `displayMany` per page render gives every card the host's real title, artwork, publication date and runtime. Before it, the page drew slugs. A missing key is **normal** (the host filtered that episode out for this visitor), never an error — see [below](#the-page-draws-real-episode-cards-now-sdk-090). |
 | `tags` | New in 0.9.0 — the site's shared vocabulary, `null` unless the manifest declares a `tags` block. The backend mirrors each episode's tags onto this plugin's own subject; `HighlightTags.tsx` renders them and links each to core's filtered feed view. This plugin declares `readsVocabulary` and **not** `writesEpisodes` — see [below](#tags-are-one-vocabulary-several-writers-share-sdk-090). |
 | `consent` | `components/ConsentExtras.tsx` — one widget per service declared in `plugin.json`'s `consent.services[]`: `analytics` (a gated, fire-and-forget view ping — a side effect, not markup), `functional` (a gated `<img>` from a declared service host, with a real click-to-load button calling `consent.request('functional')`), `social` (a category the **host doesn't know** — proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `necessary` (an **unconditional** badge — no `has()` check, no request button, now visible to visitors under core's "Always active" disclosure). `consent.granted()` drives a one-line summary; `consent.onChange` re-renders on any change (a withdrawal, or a grant from elsewhere), the full 0.4.0 flow in one component. |
-| `filter` | A read-only "Filtered to season N" note at feed/site scope when the host's URL filter selects a season. Never defines a filter axis itself (§6.1). |
+| `filter` | Live since core 0.7.6 (it was `{}` before). A read-only "Filtered to season N" note at feed/site scope, and the site tile's episode list **follows** the shell's season, tag and order — the host hands over the visitor's choice but `ctx.episodes` stays the whole scope, so the narrowing is the plugin's (`shell-filter.ts`, season from `DisplaySnapshot.season`). Never defines a filter axis itself (§6.1). |
 | `player` | An optional per-highlight "key moment" (seconds): a "Jump to mm:ss" button calls `player.seekTo()` (and logs via `ctx.log`), and `player.on('timeupdate', …)` + `player.currentTime()` flips on a "played" indicator once playback passes it. `player.on` returns an `Unsubscribe` since 0.4.0 — returned from the effect so the listener detaches on unmount/re-render instead of leaking. |
 | `route` | The `site`/`page`-placement slot mounts this same element at `/p/sample/...`; `ctx.route.path` of `highlight/<episodeSlug>` switches it into a read-only single-highlight view (title from `episodeLabels`, a back-link to `/p/sample/`), matching `SamplePlugin.metaFor`/`.urls()` server-side (see below and "Deep links need a `page` slot"). Both links *into* that subtree — the browse index's per-episode entries and the back-link out of a deep link — keep their `href` **and** hand a plain left-click to `ctx.route.navigate` (0.7.0), which is SPA navigation rather than a full document load: see [below](#internal-links-go-through-ctxroutenavigate-sdk-070). |
 | `locale` | `createPluginI18n` + `locales/{en,de}.json`, reacting to `ctx.locale.onChange`; the translator instance is memoized and its `dispose()` called on cleanup (a leak `createPluginI18n`'s own docs flag as worth fixing once `onChange` returns something to unsubscribe with). **Since 2.13.0 it also decides which language the highlight itself is shown in** — `current()` picks the stored translation, and `content()`/`available()` are the two lists that drive the editor's tabs and the admin panel's read-out. The two jobs are independent: a site can author content in a language this plugin ships no UI catalog for, so the tile can be German prose in English chrome. See [below](#two-locale-lists-and-picking-the-wrong-one-is-silent-sdk-0100). |
@@ -845,8 +845,50 @@ Three properties the code depends on:
 - **Read it live, cache per render and never per install.** The snapshot is overwritten on every feed
   refetch. That is the feature: a podcaster's title edit propagates.
 
-`displayMany` clamps at `DISPLAY_BATCH_LIMIT` (200) rather than failing, so the extras are simply absent —
-which is again indistinguishable from "filtered out", and again handled by skipping.
+`displayMany` takes any number of slugs: past `DISPLAY_BATCH_LIMIT` (200) the client splits the call and
+merges the answers (SDK 0.19.0). It used to clamp, leaving the extras absent and indistinguishable from
+"filtered out", and since core 0.7.6 `ctx.episodes` really can be longer — so `shell-filter.ts` carried a
+batching helper of its own until 2.20.0.
+
+**Where an episode sits is authoritative (SDK 0.17.0).** `feed`, `season` and `episodeNo` on a snapshot come
+from the identity layer, not the feed's presentation, so the cards say "S2 · E14" from them — and the site
+tile narrows to a filtered season by them. Never parse `ctx.episodeLabels` for a season: it is a display
+string, and it drops the season of an unnumbered episode.
+
+## Quiet planned episodes (SDK 0.18.0)
+Core 0.7.7 lets a podcaster plan an episode before its feed item exists, and keep it **quiet**: only
+podcasters and admins see it until it is announced (`announceAt`, or *Announce now*). The site hides it
+everywhere. **A plugin backend does not**: `FeedAccess.episodesIn` hands it over, phase included, because a
+planned episode is exactly when content gets prepared for it.
+
+So everything this backend publishes from that list had to learn to leave a quiet episode out: the
+`index` doc, `stats`, sitemap entries, OpenGraph cards, `hasRoute` answers and search hits. One predicate does
+it:
+
+```java
+static boolean isQuiet(PluginContext ctx, String slug) {
+    return ctx.feeds().display(slug).phase() == EpisodePhase.PLANNED;   // fails closed if display() throws
+}
+```
+
+Three things worth copying:
+
+- **Branch on the phase, never the status.** A stored `PLANNED` is either quiet or announced (`UPCOMING`,
+  which is public), and only the phase says which.
+- **Ask per request.** The phase is derived from the clock and moves with nothing written: an announcement
+  passing makes it `UPCOMING`, and a podcaster moving `announceAt` later makes it quiet again. The sitemap,
+  OG, `hasRoute` and search check it on every call. What is published on the schedule (`index`, `stats`) can
+  lag by one interval — for an announcement passing, which is harmless. Going quiet again is a write, and
+  the phase hook recomputes on it.
+- **Recompute on the phase hook, reconcile on the schedule.** `onEpisodePhaseChanged` (SDK 0.19.0) fires
+  for every *write* that moves a phase: announce, `announceAt` edits either way, release, withdrawal, cancel
+  (`null`). It recomputes, so a quiet-again episode leaves `index`/`stats` at once. The clock moving PLANNED →
+  UPCOMING fires nothing; that only makes an episode *more* visible, and the schedule picks it up. The hook is
+  best effort, so the schedule still reconciles, and recomputes are serialised. (2.19.0 used
+  `onEpisodeReleased` here; a release now reaches the phase hook too, so that one went.)
+
+Verified on a named core 0.7.7 instance: quiet → seven anonymous surfaces silent; announced → sitemap, page,
+OG and episode doc live at once; pushed back → silent again at once; feed item bound → hook fired, listed.
 
 ## `ctx.docs`, and the escape hatch underneath it
 Every doc access before 0.9.0 was string concatenation against a four-segment path, with the plugin
@@ -1396,6 +1438,53 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.20.0** — SDK **0.19.0**, hosted by core **0.8.0** (which rejects every 0.18 plugin).
+  - **A write that changes an episode's phase recomputes at once** (`onEpisodePhaseChanged`). An announced
+    episode pushed back to quiet, a withdrawal and a cancellation (phase `null`) now leave the public
+    `index`/`stats` docs straight away, not on the next pass. That closes the gap 2.19.0 shipped with (SDK#98).
+    The hook also replaces 2.19.0's `onEpisodeReleased` recompute: a release reaches it as `RELEASED`, so
+    keeping both would recompute twice per release.
+  - **`drafts` and `announced` get a podcaster read floor** (`data.keyFloors`). `backendOwned` only ever
+    governed writes, so unreviewed machine translations and announcement bookkeeping were readable by anyone.
+    The editor that offers drafts is a podcaster's and still reads them. A visitor gets a 403 with the
+    `key-floor` problem type.
+  - **`displayAll` is gone**: `ctx.feeds.displayMany` splits past 200 itself.
+  - **The "Not announced" chip shows** in the podcaster's to-write list now that core puts quiet plans in a
+    podcaster's `ctx.episodes` (core#258).
+  - **GDPR export (core 0.8.0):** unchanged on purpose. A list of favourite marks has no format of its own, so
+    `exportUser`'s map is the right shape, and the host writes it as `plugins/sample/data.json`. `exportFiles`
+    is for data a person would open in another tool. A test pins the host's ask order.
+- **2.19.0** — SDK **0.18.0**, hosted by core **0.7.7**. Core 0.7.7 lets a podcaster plan an episode
+  **quietly** — visible to podcasters and admins only until it is announced — and rejects every 0.17 plugin.
+  - **Nothing public names a quiet episode.** A backend sees planned episodes (that is when content is
+    prepared), so everything this one derives from `episodesIn` was about to publish them: the `index` doc,
+    `stats`, the sitemap, OpenGraph, `hasRoute` and search. `isQuiet(slug)` (phase `PLANNED`) gates all of
+    them. The per-request ones ask per request, because the phase moves with nothing written. Drafting and the
+    image sweep still see the episode, since preparing is the point. Verified live, in both directions.
+  - **`onEpisodeReleased`** recomputes at once, so a highlight prepared for a planned episode is listed the
+    moment the feed item binds, not up to an interval later. The schedule remains the guarantee (the hook is
+    best effort by contract), and recomputes are now serialised so the hook cannot double-announce.
+  - **Translations written while preparing are not announced** on release: the first public pass seeds them.
+  - **The page drops cards the host answered without** (withdrawn, gated, or gone quiet since the last pass)
+    instead of falling back to the slug and excerpt. A failed snapshot call still degrades to slugs.
+  - **Phase-aware episode tile**, and a "Not announced" chip in the podcaster's to-write list (core#258: core
+    0.7.7 does not put quiet episodes in a podcaster's `ctx.episodes` yet, so the chip waits on that).
+  - **Known gap** (SDK#98): an *announced* episode pushed back to quiet keeps its entry in the public
+    `index`/`stats` docs until the next recompute. Nothing signals that transition. Every per-request surface
+    and the rendered page hide it at once.
+- **2.18.0** — SDK **0.17.0**, hosted by core **0.7.6**. A rebuild the host demands — core 0.7.6 rejects every
+  0.16 plugin, since `DisplaySnapshot` grew record components a 0.16 host cannot hand over — plus what the
+  new contract and host make possible.
+  - **The site tile's episode list follows the shell's filter.** `ctx.filter` was `{}` on every core before
+    0.7.6, so the "Filtered to season N" note never showed and nothing followed the visitor's choice. Now
+    `?season=`, `?tag=` and `?order=oldest` narrow and order the list beside the shell's own, season from
+    `DisplaySnapshot.season`, tags through `ctx.tags.episodesWith`. Nothing is fetched while the view is
+    unfiltered, and a filter it cannot apply says so above an unfiltered list rather than passing it off.
+  - **Cards say where an episode sits** ("S2 · E14", "Season 2" for an unnumbered one), from the snapshot's
+    identity fields rather than from `ctx.episodeLabels`.
+  - **Snapshots are fetched in batches.** `ctx.episodes` is no longer cut at 200 (core#248), and a single
+    `displayMany` clamps there, so the page's cards for a long show's oldest episodes fell back to slugs.
+  - PF4J **3.16.0**, the version core loads plugins with (SDK 0.16.2).
 - **2.17.0** — SDK **0.16.1**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
   and this plugin had two of the things they found.
   - **Security: highlight Markdown goes through `ctx.sanitize`.** Both render paths ran
