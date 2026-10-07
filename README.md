@@ -1438,6 +1438,16 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.20.1** — SDK **0.19.1**, hosted by core **0.8.2**. A patch release before the first public site.
+  - **A burst of phase events costs one recompute, not one per episode.** Deleting a feed sends a phase event
+    for every episode at once, each on its own thread (SDK 0.19.1 documents it). 2.20.0 ran a full recompute
+    for each, queued behind one lock: forty serialised walks of the site for a forty-episode feed. Events
+    now coalesce. Whoever finds a pass running hands the request over and returns, and the runner goes
+    again only if something arrived meanwhile. A test fires 40 concurrent events and allows at most 3 passes;
+    the old behaviour took 40.
+  - **Sizes read in binary units.** `i18n.bytes` now says KiB/MiB (SDK 0.19.1), so the upload quota line
+    matches the number core's admin shows for the same quota.
+  - `platformApi` 0.19.1, the SDK's own version. It is the same contract minor, and core matches `major.minor`.
 - **2.20.0** — SDK **0.19.0**, hosted by core **0.8.0** (which rejects every 0.18 plugin).
   - **A write that changes an episode's phase recomputes at once** (`onEpisodePhaseChanged`). An announced
     episode pushed back to quiet, a withdrawal and a cancellation (phase `null`) now leave the public

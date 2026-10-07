@@ -45,6 +45,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.pf4j.Extension;
@@ -532,9 +534,41 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         // above reconciles it, and both hooks are best effort by contract anyway.
         ctx.onEpisodePhaseChanged((slug, phase) -> {
             ctx.logger().info("episode {} is now {}; recomputing what is published about it", slug,
-                    phase == null ? "cancelled" : phase);
-            recomputeHighlightStats(ctx, null);
+                    phase == null ? "gone" : phase);
+            requestRecompute(ctx);
         });
+    }
+
+    /** Set by every phase event; cleared by the pass that will see its effect. See {@link #requestRecompute}. */
+    private final AtomicBoolean recomputeRequested = new AtomicBoolean();
+
+    /** Held by the one thread running coalesced passes; everyone else hands their request over and leaves. */
+    private final ReentrantLock recomputeRunner = new ReentrantLock();
+
+    /**
+     * Asks for a recompute, coalescing a burst of phase events into as few passes as the burst needs.
+     *
+     * <p>Each phase event arrives on a thread of its own, many at once and in no order (SDK 0.19.1): deleting
+     * a feed sends one per episode, a manual match one for each side. Every pass reads the whole site, so one
+     * pass after the burst answers for all of it — while a pass per event, serialised on the recompute lock,
+     * was N full walks of the site queued behind each other for a 200-episode feed.
+     *
+     * <p>A request always leaves a pass behind it that has not started yet: the runner clears the flag
+     * <em>before</em> it walks, and re-checks after releasing the lock, so a request arriving mid-pass is seen
+     * by the next one rather than lost between "done" and "unlock". A caller that finds the runner busy
+     * returns at once — the event thread is the host's, and holding it buys nothing.
+     */
+    private void requestRecompute(PluginContext ctx) {
+        recomputeRequested.set(true);
+        while (recomputeRequested.get() && recomputeRunner.tryLock()) {
+            try {
+                if (recomputeRequested.getAndSet(false)) {
+                    recomputeHighlightStats(ctx, null);
+                }
+            } finally {
+                recomputeRunner.unlock();
+            }
+        }
     }
 
     /**
