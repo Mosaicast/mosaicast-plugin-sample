@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { makeMockCtx, makeMockDocs } from '@mosaicast/plugin-sdk/testing';
 import { PLATFORM_API_VERSION } from '@mosaicast/plugin-sdk';
@@ -119,6 +119,22 @@ describe('plugin.json ↔ bundle contract', () => {
     for (const slot of manifest.slots) {
       expect(declared.has(slot.element), `slot targets undeclared element "${slot.element}"`).toBe(true);
     }
+  });
+});
+
+/**
+ * Unmount everything a test left mounted, while jsdom still exists.
+ *
+ * These tests mount real custom elements on `document.body` and mostly leave them there. With React 18 that
+ * was harmless; React 19's scheduler can still have work queued when the file ends, and runs it on a
+ * `setImmediate` *after* vitest has torn jsdom down — `ReferenceError: window is not defined` as an
+ * unhandled error, failing CI on a run where every test passed. Removing the element runs the real
+ * `disconnectedCallback` → `MosaicastHandle.destroy` → `root.unmount()`, inside `act` so the work drains here.
+ */
+afterEach(async () => {
+  await act(async () => {
+    document.body.querySelectorAll('sample-highlight, sample-highlight-card, sample-highlight-page, sample-highlight-settings')
+      .forEach((el) => el.remove());
   });
 });
 
