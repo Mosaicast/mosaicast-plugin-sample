@@ -84,7 +84,9 @@ import tools.jackson.databind.JsonNode;
  *       {@link #sweepOrphanedImages(PluginContext, Set)}. Nothing on this platform collects orphans, a blob
  *       outlives the document that named it, and only this plugin knows which those are. The frontend drops
  *       the ref it just stopped pointing at; this is the net under it, and being a backend job is not
- *       incidental — it is the only place a whole-store view exists.
+ *       incidental — it is the only place a whole-store view exists. An admin can put it in report-only
+ *       mode with the manifest's {@code imageSweep} config field, which is also where this plugin
+ *       demonstrates a closed {@code options} set on a setting whose typo would otherwise cost files.
  *   <li><strong>Serve deep links</strong> ({@code /p/sample/highlight/<episodeSlug>}, ARCHITECTURE §6.4):
  *       this class also implements {@link ShareMetadataProvider} (OpenGraph tags for link scrapers) and
  *       {@link SitemapProvider} ({@code sitemap.xml} entries) — and since SDK 0.12.0 both of them
@@ -155,6 +157,12 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
 
     /** Fallback used when the podcaster has not configured {@code refreshIntervalMinutes}. */
     static final int DEFAULT_REFRESH_MINUTES = 30;
+
+    /** {@code imageSweep}: delete every uploaded image no highlight points at. The manifest's default. */
+    static final String SWEEP_DELETE = "delete";
+
+    /** {@code imageSweep}: name the orphans in the log and delete nothing. */
+    static final String SWEEP_REPORT = "report";
 
     /** The deep-link subpath prefix this plugin serves: {@code /p/sample/highlight/<episodeSlug>}. */
     private static final String HIGHLIGHT_SUBPATH_PREFIX = "highlight/";
@@ -465,26 +473,73 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      */
     private volatile PluginContext ctx;
 
+    /** Sentinel for {@link #lastLoggedRefreshMinutes}: no value has been logged yet. */
+    private static final int REFRESH_MINUTES_UNLOGGED = Integer.MIN_VALUE;
+
+    /**
+     * The last {@code refreshIntervalMinutes} {@link #refreshInterval(PluginContext)} logged about, so it
+     * can report a change rather than every tick.
+     *
+     * <p>{@code volatile} for the same reason {@link #ctx} is: written on the host's startup thread during
+     * {@code register()} and then on a scheduler thread before each fire. A lost update here costs one
+     * duplicate or one missing log line and nothing else, so a plain field would be defensible — but a
+     * torn {@code int} read is not worth the argument.
+     */
+    private volatile int lastLoggedRefreshMinutes = REFRESH_MINUTES_UNLOGGED;
+
     @Override
     public void register(PluginContext ctx) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
 
-        int minutes = ctx.config().get("refreshIntervalMinutes", Integer.class, DEFAULT_REFRESH_MINUTES);
-        if (minutes <= 0) {
-            // onSchedule throws for a non-positive duration, which disables the whole plugin at next
-            // startup (ARCHITECTURE §7.8) — clamp defensively rather than trust a podcaster-editable
-            // config value, but tell an operator why the effective interval doesn't match what's configured.
-            ctx.logger().warn("configured refreshIntervalMinutes={} is not positive; clamping to 1 minute", minutes);
-        }
-        Duration interval = Duration.ofMinutes(Math.max(1, minutes));
-
-        ctx.logger().info("registered; recomputing highlight stats every {}", interval);
+        ctx.logger().info("registered; recomputing highlight stats every {}", refreshInterval(ctx));
         // Recompute once now, then on the schedule. The eager pass is not just for freshness: `stats` and
         // `favourites` are declared `data.backendOwned` (SDK 0.6.0), which refuses *new* client writes but
         // does not remove a document forged before the declaration existed. A backend that only wrote on
         // its schedule would keep serving that forgery until the next tick — up to refreshIntervalMinutes.
         recomputeHighlightStats(ctx, null);
-        ctx.onSchedule(interval, () -> recomputeHighlightStats(ctx, null));
+        // A supplier, not a Duration (SDK 0.15.0). The Duration overload captures its value here, during
+        // register(), and the host holds it for the life of the process — so a podcaster saving a new
+        // refreshIntervalMinutes got a form that said "saved", a stored value that read back correctly,
+        // and a plugin still recomputing at the old cadence until someone restarted core. Nothing on
+        // either screen said so. Handing over the *reading* of the period instead lets the host re-read it
+        // before every tick and reschedule when the answer differs, so an edit lands within one old period.
+        ctx.onSchedule(() -> refreshInterval(ctx), () -> recomputeHighlightStats(ctx, null));
+    }
+
+    /**
+     * The period between two recomputes, re-read from config on every call.
+     *
+     * <p>Handed to {@link PluginContext#onSchedule(java.util.function.Supplier, Runnable)} rather than
+     * evaluated once, which is the whole point: {@code refreshIntervalMinutes} is
+     * {@code editableBy: "podcaster"} in the manifest, so its value is expected to change under a running
+     * plugin.
+     *
+     * <p><strong>Cheap and side-effect free, deliberately.</strong> The host calls this on a scheduler
+     * thread before every fire. A config read and a comparison is the budget; a store query or anything
+     * that blocks does not belong here. The host is also forgiving about the answer — {@code null}, a
+     * non-positive {@link Duration} or a throw leaves the task on its last valid period — but only after
+     * registration. The value returned during {@code register()} is strict and a non-positive one throws,
+     * which would disable this plugin at the next startup (ARCHITECTURE §7.8), so the clamp below is not
+     * optional.
+     *
+     * @param ctx the context to read config from
+     * @return a positive period; at least one minute, whatever the podcaster typed
+     */
+    private Duration refreshInterval(PluginContext ctx) {
+        int minutes = ctx.config().get("refreshIntervalMinutes", Integer.class, DEFAULT_REFRESH_MINUTES);
+        // Log the *transition*, never the tick. This method now runs once per fire, so an unconditional
+        // line here would bury the log at exactly the cadence the operator is trying to tune.
+        if (minutes != lastLoggedRefreshMinutes) {
+            if (minutes <= 0) {
+                ctx.logger().warn("configured refreshIntervalMinutes={} is not positive; clamping to 1 minute",
+                        minutes);
+            } else if (lastLoggedRefreshMinutes != REFRESH_MINUTES_UNLOGGED) {
+                // Only from the second distinct value on: the first one is already in the registration line.
+                ctx.logger().info("refreshIntervalMinutes changed to {}; rescheduling", minutes);
+            }
+            lastLoggedRefreshMinutes = minutes;
+        }
+        return Duration.ofMinutes(Math.max(1, minutes));
     }
 
     /**
@@ -986,6 +1041,14 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * is the whole lesson for anyone copying this: <em>what your backend can enumerate bounds what it can
      * safely garbage-collect</em>. Widen where images may be attached and you must widen this first, or
      * the next tick quietly deletes them.
+     *
+     * <p><strong>{@code imageSweep} decides whether this deletes or only reports.</strong> The manifest
+     * declares it with an {@code options} set of exactly {@code delete} and {@code report}, which is the
+     * difference between a closed set and a free-text box put at its sharpest: core refuses a value
+     * outside the set at write time and refuses the manifest's own {@code default} at load, so an operator
+     * cannot save {@code "reprot"}, be told it worked, and have this method go on deleting their files. It
+     * is {@code editableBy: "admin"} rather than {@code podcaster} because deleting stored files is acting
+     * on storage, not configuring a feature.
      */
     private static void sweepOrphanedImages(PluginContext ctx, Set<String> referenced) {
         var blobs = ctx.blobs();
@@ -993,6 +1056,16 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
             // Null unless the manifest declares a `blobs` block — and an operator may refuse it on their
             // install even though this one declares it. No storage, nothing to sweep.
             return;
+        }
+        String mode = ctx.config().get("imageSweep", String.class, SWEEP_DELETE);
+        if (!SWEEP_DELETE.equals(mode) && !SWEEP_REPORT.equals(mode)) {
+            // `options` closes this door going forward, but it cannot un-store a value written before the
+            // field declared one. Fall back to the *safe* branch rather than the default one: refusing to
+            // delete on a value we do not understand costs storage, and the other way costs files. Warned
+            // once per recompute — not once per scheduler tick — and it reports a state actively
+            // preventing cleanup, so it is worth the line each pass.
+            ctx.logger().warn("unrecognised imageSweep={}; reporting orphans instead of deleting them", mode);
+            mode = SWEEP_REPORT;
         }
         // Page the whole list *before* deleting anything. Removing entries from a collection being paged
         // shifts the rest forward, so a cursor that advanced between deletions would step over exactly as
@@ -1009,6 +1082,16 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
             if (batch.size() < BLOB_SWEEP_PAGE_SIZE) {
                 break;
             }
+        }
+        if (SWEEP_REPORT.equals(mode)) {
+            // Name them, so the log is something an operator can act on — a count alone tells them a
+            // number and nothing they can check. Nothing else on this platform collects orphans, so this
+            // mode leaks storage by design; it exists to be switched on before a first sweep and off after.
+            if (!orphans.isEmpty()) {
+                ctx.logger().info("imageSweep=report: {} orphaned highlight image(s) left in place: {}",
+                        orphans.size(), orphans);
+            }
+            return;
         }
         int deleted = 0;
         for (String ref : orphans) {
