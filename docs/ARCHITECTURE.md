@@ -317,8 +317,8 @@ public interface PluginContext {
     // onEpisodePhaseChanged (0.19.0) is the general case: it fires when a *write* changes an episode's
     // derived phase — compared before and after the write at one instant — with the slug and the new
     // phase: announce, an `announceAt` edit either way, every release path, a withdrawal, a withdrawn
-    // episode returning, and an episode that no longer exists (phase null): a cancelled plan, or the
-    // duplicate a match or a confirmed suggestion removed. The clock passing
+    // episode returning, and an episode that no longer exists (phase null): a cancelled plan, the
+    // duplicate a match or a confirmed suggestion removed, or every episode of a deleted feed. The clock passing
     // `announceAt` fires nothing, since no write happened and becoming visible late is harmless; becoming
     // *hidden* late is a leak, which is why the write that hides an episode must tell plugins at once. Same
     // delivery as onEpisodeReleased, and on a release those listeners run first.

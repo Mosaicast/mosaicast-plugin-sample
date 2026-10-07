@@ -1688,4 +1688,86 @@ class SamplePluginTest {
                     EpisodePhase.RELEASED, null);
         }
     }
+
+    @Test
+    void coalescesABurstOfPhaseEventsInsteadOfWalkingTheSiteOncePerEpisode() throws Exception {
+        // SDK 0.19.1: deleting a feed sends one event per episode, each on its own thread, all at once. A pass
+        // reads the whole site, so one pass after the burst answers for all of it; 40 serialised passes for
+        // 40 events is the cost this guards against.
+        int burst = 40;
+        String[] slugs = new String[burst + 1];
+        slugs[0] = "kept";
+        for (int i = 1; i <= burst; i++) {
+            slugs[i] = "gone-" + i;
+        }
+        SlowCountingFeeds feeds = new SlowCountingFeeds(slugs);
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                .withReadsAllUsers();
+        for (String slug : slugs) {
+            ctx.store().put(Scope.episode(slug), "highlight", new Highlight("about " + slug));
+        }
+        plugin.register(ctx);
+        assertEquals(burst + 1, indexedSlugs(ctx).size());
+
+        // The feed goes, every episode with it; then the events arrive together.
+        for (int i = 1; i <= burst; i++) {
+            feeds.remove(slugs[i]);
+            ctx.store().delete(Scope.episode(slugs[i]), "highlight");
+        }
+        int passesBefore = feeds.sitePasses.get();
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(burst);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        List<java.util.concurrent.Future<?>> done = new ArrayList<>();
+        for (int i = 1; i <= burst; i++) {
+            String slug = slugs[i];
+            done.add(pool.submit(() -> {
+                go.await();
+                ctx.fireEpisodePhaseChanged(slug, null);
+                return null;
+            }));
+        }
+        go.countDown();
+        for (java.util.concurrent.Future<?> f : done) {
+            f.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        pool.shutdown();
+
+        int passes = feeds.sitePasses.get() - passesBefore;
+        assertTrue(passes >= 1 && passes <= 3, "a burst of " + burst + " events took " + passes + " passes");
+        assertEquals(List.of("kept"), indexedSlugs(ctx), "and the passes that ran saw every removal");
+    }
+
+    /** A site whose listing is slow enough for a burst of events to overlap a pass, and that counts passes. */
+    private static final class SlowCountingFeeds implements FeedAccess {
+        final java.util.concurrent.atomic.AtomicInteger sitePasses = new java.util.concurrent.atomic.AtomicInteger();
+        private final List<String> slugs;
+
+        SlowCountingFeeds(String... slugs) {
+            this.slugs = new java.util.concurrent.CopyOnWriteArrayList<>(List.of(slugs));
+        }
+
+        void remove(String slug) {
+            slugs.remove(slug);
+        }
+
+        @Override
+        public List<String> episodesIn(Scope scope) {
+            sitePasses.incrementAndGet();
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return List.copyOf(slugs);
+        }
+
+        @Override
+        public DisplaySnapshot display(String refId) {
+            if (!slugs.contains(refId)) {
+                throw new IllegalArgumentException("no such episode: " + refId);
+            }
+            return new DisplaySnapshot(refId, null, null, null, null, null, null, null, null, "", null, null, null,
+                    EpisodePhase.RELEASED, null);
+        }
+    }
 }
