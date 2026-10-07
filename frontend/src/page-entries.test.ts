@@ -156,6 +156,18 @@ describe('nav entries — the manifest and the page agree', () => {
     expect(manifest.platformApi).toBe(PLATFORM_API_VERSION);
   });
 
+  it('declares the SDK 0.16.0 capabilities and constraints it relies on', () => {
+    // The backend tallies every visitor's `fav:` marks; without the declaration `ctx.allUsers()` is null and
+    // the favourite counts stop. It is declared rather than implied because an operator should see it.
+    expect(manifest.data?.readsAllUsers).toBe(true);
+    // `0` used to save, and the backend clamp turned it into a one-minute rollup; the host now refuses it on write.
+    expect(manifest.config?.refreshIntervalMinutes).toMatchObject({ min: 1, step: 1 });
+    // `social` is this plugin's own consent category, so it owes the visitor a name for it.
+    const labels = manifest.consent?.categoryLabels ?? {};
+    expect(Object.keys(labels)).toEqual(['social']);
+    expect(labels.social?.label).toMatchObject({ en: expect.any(String), de: expect.any(String) });
+  });
+
   it('never offers the detail route as an entrance', () => {
     // A menu cannot hold one row per episode. An entry point is where someone starts, not everywhere
     // they can end up.

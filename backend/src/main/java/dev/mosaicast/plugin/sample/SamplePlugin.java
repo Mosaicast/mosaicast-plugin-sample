@@ -4,6 +4,7 @@
 package dev.mosaicast.plugin.sample;
 
 import dev.mosaicast.plugin.api.BlobInfo;
+import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.LocaleInfo;
@@ -73,7 +74,7 @@ import tools.jackson.databind.JsonNode;
  *       housekeeping job no per-request code path can do.
  *   <li><strong>Aggregate across users</strong> (SDK 0.5.0): the same pass tallies every visitor's
  *       {@code fav:<episodeSlug>} mark out of their own {@link dev.mosaicast.plugin.api.ScopeType#USER}
- *       partition via {@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} and publishes a
+ *       partition via {@link dev.mosaicast.plugin.api.CrossUserStore#query(String) ctx.allUsers().query(...)} and publishes a
  *       per-episode count to an episode scope the frontend may read. This is the only way that number can
  *       be assembled at all — per-user documents live at {@code data/user/me/…}, which resolves to the
  *       <em>caller's</em> partition, so no browser can count anybody but itself. It is also the only way
@@ -265,7 +266,20 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     private static final int DESCRIPTION_EXCERPT_LENGTH = 160;
 
     /** Markdown punctuation dropped by {@link #excerpt(String)}; precompiled — {@code urls()} runs per request. */
-    private static final Pattern MARKDOWN_TOKENS = Pattern.compile("[#*_`\\[\\]()]");
+    private static final Pattern MARKDOWN_TOKENS = Pattern.compile("[#*_`|\\[\\]()]");
+
+    /**
+     * A {@code <style>}/{@code <script>} element <em>with its content</em>. Markdown passes raw HTML through,
+     * and {@code ctx.sanitize} drops both on the page — so their text is not part of what a reader sees and
+     * must not become the share preview or the search snippet either.
+     */
+    private static final Pattern HTML_NON_TEXT = Pattern.compile("(?is)<(style|script)\\b.*?</\\1\\s*>");
+
+    /** Any other HTML tag; its text content stays, as it does on the rendered page. */
+    private static final Pattern HTML_TAG = Pattern.compile("<[^>]*>");
+
+    /** A GFM table's delimiter row ({@code |:---|:---:|}), which renders as nothing and reads as noise. */
+    private static final Pattern TABLE_RULE = Pattern.compile("(?m)^[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*$");
 
     /** Collapses newlines/indentation into single spaces for a one-line OG description. */
     private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
@@ -1107,9 +1121,31 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
     }
 
     /**
+     * Every visitor's {@code fav:} marks, across all their {@code USER} partitions (SDK 0.16.0).
+     *
+     * <p>The one read in this plugin that crosses an ownership boundary, so the manifest declares it —
+     * {@code "data": { "readsAllUsers": true }} — and {@code ctx.allUsers()} is {@code null} without that.
+     * Until 0.16.0 it was {@code ctx.store().queryAcrossUsers(...)}, reachable by any plugin by merely existing;
+     * now an operator can read off the manifest that this one tallies its visitors' favourites.
+     *
+     * <p>{@code null} here means the manifest and this code disagree, which is a bug to see, not a state to
+     * degrade through: an empty tally would publish "nobody favourited anything" as if it were true.
+     *
+     * @throws IllegalStateException if the manifest no longer declares {@code data.readsAllUsers}
+     */
+    private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx) {
+        CrossUserStore everyone = ctx.allUsers();
+        if (everyone == null) {
+            throw new IllegalStateException(
+                    "plugin.json no longer declares data.readsAllUsers, which favourite counts need");
+        }
+        return everyone.query(FAVOURITE_KEY_PREFIX);
+    }
+
+    /**
      * Counts every visitor's {@code fav:<episodeSlug>} mark, keyed by episode slug.
      *
-     * <p>{@link dev.mosaicast.plugin.api.DocStore#queryAcrossUsers(String)} is the backend's <em>only</em>
+     * <p>{@link dev.mosaicast.plugin.api.CrossUserStore#query(String) ctx.allUsers().query(...)} is the backend's <em>only</em>
      * window onto {@code USER} partitions: {@code store().get(Scope.user(), …)} and friends throw
      * {@link UnsupportedOperationException}, because a scheduled task has no calling user and resolving
      * {@code "me"} without one would have to pick somebody. There is no HTTP surface for this method
@@ -1137,7 +1173,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      */
     private static Map<String, List<UUID>> tallyFavourites(PluginContext ctx, UUID excludedUserId) {
         Map<String, List<UUID>> byEpisode = new HashMap<>();
-        for (OwnedDocEntry entry : ctx.store().queryAcrossUsers(FAVOURITE_KEY_PREFIX)) {
+        for (OwnedDocEntry entry : everyonesFavourites(ctx)) {
             if (excludedUserId != null && excludedUserId.equals(entry.userId())) {
                 continue;
             }
@@ -1594,7 +1630,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * anything; it recomputes from the current store while skipping this user, which yields the same answer
      * however many times it runs. {@code UserDataHandlerHarness.eraseTwice} is that test. Note handlers run
      * <strong>before</strong> core drops the account row, so the marks are still visible to
-     * {@code queryAcrossUsers} at this moment — hence the filter rather than a plain re-tally.
+     * {@code allUsers().query(...)} at this moment — hence the filter rather than a plain re-tally.
      *
      * <p><strong>Throwing is the right answer to a failure.</strong> §12.8: the host writes a row per plugin
      * before it asks and leaves an <em>open record</em> on a failure rather than a log line, then retries
@@ -1641,7 +1677,7 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         UUID id = UUID.fromString(Objects.requireNonNull(userId, "userId"));
         Set<String> inFeed = Set.copyOf(ctx.feeds().episodesIn(Scope.site()));
         List<Map<String, Object>> marks = new ArrayList<>();
-        for (OwnedDocEntry entry : ctx.store().queryAcrossUsers(FAVOURITE_KEY_PREFIX)) {
+        for (OwnedDocEntry entry : everyonesFavourites(ctx)) {
             if (!id.equals(entry.userId()) || isWithdrawnMark(entry.value())) {
                 continue;
             }
@@ -1662,9 +1698,16 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
         return marks.isEmpty() ? Optional.empty() : Optional.of(Map.of("favouritedHighlights", List.copyOf(marks)));
     }
 
-    /** Strips the most common markdown tokens and collapses whitespace, for a plain-text OG description. */
-    private static String excerpt(String markdown) {
-        String plain = WHITESPACE_RUN.matcher(MARKDOWN_TOKENS.matcher(markdown).replaceAll("")).replaceAll(" ").trim();
+    /**
+     * Plain text for an OG description, a search snippet and the page listing: raw HTML and table rules out,
+     * the most common markdown tokens stripped, whitespace collapsed. Approximately what the rendered page
+     * says — the page itself goes through {@code ctx.sanitize}, this never renders as HTML anywhere.
+     */
+    static String excerpt(String markdown) {
+        String text = HTML_NON_TEXT.matcher(markdown).replaceAll(" ");
+        text = HTML_TAG.matcher(text).replaceAll(" ");
+        text = TABLE_RULE.matcher(text).replaceAll("");
+        String plain = WHITESPACE_RUN.matcher(MARKDOWN_TOKENS.matcher(text).replaceAll("")).replaceAll(" ").trim();
         return plain.length() <= DESCRIPTION_EXCERPT_LENGTH ? plain : plain.substring(0, DESCRIPTION_EXCERPT_LENGTH).trim() + "…";
     }
 }

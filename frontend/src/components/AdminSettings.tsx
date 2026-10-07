@@ -20,7 +20,7 @@ export interface SiteSettings {
  *
  * **This is the one place in the plugin that still builds a path by hand, and it is on purpose.**
  * Everywhere else moved to `ctx.docs` in 2.12.0, which is the right default: it builds the path, validates
- * the key against the host's pattern before a 400 round-trip, and turns a 404 into `null`. But `ctx.api`
+ * the key against the host's pattern before a 400 round-trip, and resolves an unwritten key to `null`. But `ctx.api`
  * did not go away — the SDK keeps it as the documented escape hatch for anything the typed client does not
  * cover, and a reference plugin that used only the sugar would leave an author guessing whether the raw
  * client was still supported. It is. `ctx.docs.get('site', 'settings')` would be the idiomatic call here;
@@ -63,8 +63,8 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
 
   useEffect(() => {
     // `getOrNull` on the raw client (SDK 0.9.0), which is the escape hatch's half of the same fix
-    // `ctx.docs.get` has: "nothing saved yet" is the ordinary state of a settings document, so a 404 is an
-    // answer. Every other status still rejects, and the catch below is a real error path again rather than
+    // `ctx.docs.get` has: "nothing saved yet" is the ordinary state of a settings document, and the host's
+    // 204 for it (SDK 0.16.0; a 404 before) resolves `null`. Every other status still rejects, and the catch below is a real error path again rather than
     // the `.catch(() => setSettings({}))` that reported a 500 to the podcaster as an empty form.
     ctx.api
       .getOrNull<SiteSettings>(SETTINGS_PATH)
@@ -102,7 +102,8 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
         .settings { background: var(--mc-surface); color: var(--mc-text); border: 1px solid var(--mc-border);
           border-radius: 0.5rem; padding: 0.75rem 1rem; font-family: system-ui, sans-serif; display: flex;
           flex-direction: column; gap: 0.5rem; }
-        .settings .title { font-size: 0.85rem; font-weight: 600; color: var(--mc-accent); margin: 0; }
+        .settings .title { font-size: 0.85rem; font-weight: 600; line-height: inherit; color: var(--mc-accent-text);
+          margin: 0; }
         .settings .hint { font-size: 0.75rem; color: var(--mc-text-muted); margin: 0; }
         /* Fenced off from the editable fields above it, because nothing in here is editable *from this
            panel*: both lists are an admin's decision made elsewhere in the shell. A read-only block
@@ -129,10 +130,11 @@ export function AdminSettings({ ctx }: { ctx: PluginContext }) {
         .settings .error .detail { color: var(--mc-text-muted); }
       `}</style>
 
-      <p className="title">
+      {/* `h2`, like the highlight section above it in the same sidebar: both sit under the panel's `h1`. */}
+      <h2 className="title">
         <Icon name="settings" />
         {i18n.t('settings.title')}
-      </p>
+      </h2>
       <p className="hint">{i18n.t('settings.hint')}</p>
 
       <label>

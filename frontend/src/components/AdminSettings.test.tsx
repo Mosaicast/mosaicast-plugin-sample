@@ -23,6 +23,13 @@ const nativeInputValueSetter = () =>
   Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
 
 describe('AdminSettings — the plugin-owned site/sidebar podcaster settings panel', () => {
+  it('titles the panel with an h2, like the highlight section beside it in the sidebar (#48)', async () => {
+    const container = mount(makeMockCtx({ scope: { type: 'site', id: 'main' }, user: mockUser('u1', 'admin') }));
+    await flush();
+
+    expect(container.querySelector('.title')!.tagName).toBe('H2');
+  });
+
   it('loads the current heading override and font from the store', async () => {
     const ctx = makeMockCtx({
       scope: { type: 'site', id: 'main' },

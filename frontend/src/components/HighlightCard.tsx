@@ -67,7 +67,7 @@ export function HighlightCard({ ctx }: { ctx: PluginContext }) {
           font-size: 0.75rem;
           color: var(--mc-text-muted);
         }
-        .card .label { color: var(--mc-accent); font-weight: 600; display: inline-flex; align-items: center; gap: 0.25rem; }
+        .card .label { color: var(--mc-accent-text); font-weight: 600; display: inline-flex; align-items: center; gap: 0.25rem; }
         .card .sep { opacity: 0.6; }
       `}</style>
       {/* The badge's mark used to be a literal ✨ in the catalogs. A host icon instead: it is `1em`, so it

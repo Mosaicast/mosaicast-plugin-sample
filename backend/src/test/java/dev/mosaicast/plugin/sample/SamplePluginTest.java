@@ -70,7 +70,7 @@ class SamplePluginTest {
 
     private static FakePluginContext contextWithEpisodes(MapPluginConfig config, String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        return new FakePluginContext(new InMemoryDocStore(), config, feeds, null);
+        return new FakePluginContext(new InMemoryDocStore(), config, feeds, null).withReadsAllUsers();
     }
 
     /**
@@ -83,7 +83,7 @@ class SamplePluginTest {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
         InMemoryDocStore store = new InMemoryDocStore()
                 .withBackendOwned("stats", "favourites", "index", "drafts", "announced");
-        return new FakePluginContext(store, new MapPluginConfig(), feeds, null);
+        return new FakePluginContext(store, new MapPluginConfig(), feeds, null).withReadsAllUsers();
     }
 
     @Test
@@ -118,7 +118,7 @@ class SamplePluginTest {
     // The favourite tests below are the only ones that touch a USER scope, and they do it through
     // InMemoryDocStore.asUser(...) — the test kit's stand-in for the host resolving "me" from a session.
     // There is no production counterpart: no real DocStore can write into a user's partition, which is
-    // exactly why the plugin reads them back through queryAcrossUsers instead of store().get(Scope.user()).
+    // exactly why the plugin reads them back through ctx.allUsers().query(...) instead of store().get(Scope.user()).
 
     @Test
     void countsEveryVisitorsFavouriteAndPublishesThePerEpisodeTotal() {
@@ -142,6 +142,22 @@ class SamplePluginTest {
         assertEquals(
                 Optional.of(new HighlightStats(2, 0, 0, 3, 0, 0)),
                 ctx.store().get(Scope.site(), "stats", HighlightStats.class));
+    }
+
+    @Test
+    void refusesToTallyFavouritesWithoutTheReadsAllUsersDeclaration() {
+        // What the host hands a plugin whose manifest dropped `data.readsAllUsers`: `allUsers()` is null.
+        // Degrading to an empty tally would publish "nobody favourited anything" as a fact, so the recompute
+        // in register() throws instead — and the host refuses to load a plugin whose register() throws,
+        // which is the loud failure a manifest/code disagreement deserves.
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+        ctx.store().asUser(UUID.randomUUID()).put(Scope.user(), "fav:ep-1", true);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> plugin.register(ctx));
+
+        assertTrue(thrown.getMessage().contains("data.readsAllUsers"), thrown.getMessage());
+        assertTrue(ctx.store().get(Scope.episode("ep-1"), "favourites", FavouriteCount.class).isEmpty());
     }
 
     @Test
@@ -291,8 +307,8 @@ class SamplePluginTest {
     void doesNotPublishAContentlessHighlightToTheSitemapOrOpenGraph() {
         // Reachable between scheduled prunes: the frontend writes the doc, recompute hasn't run yet.
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1", "ep-2")))
-                .withDisplay("ep-1", new DisplaySnapshot("Blank", null, null, null, null, null, null, null, null));
-        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+                .withDisplay("ep-1", new DisplaySnapshot("Blank", null, null, null, null, null, null, null, null, ""));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
         ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("   "));
         ctx.store().put(Scope.episode("ep-2"), "highlight", new Highlight("real content"));
 
@@ -423,8 +439,8 @@ class SamplePluginTest {
                         "ep-1",
                         new DisplaySnapshot(
                                 "The Lighthouse", "show notes", null, null, null, "https://img.example/ep-1.png", null,
-                                null, null));
-        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+                                null, null, ""));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
         ctx.store()
                 .put(
                         Scope.episode("ep-1"),
@@ -450,8 +466,8 @@ class SamplePluginTest {
         // alternate for — one plugin making two contradictory claims about one URL.
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("ep-1")))
                 .withDisplay("ep-1",
-                        new DisplaySnapshot("Der Leuchtturm", null, null, null, null, null, null, null, null));
-        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null)
+                        new DisplaySnapshot("Der Leuchtturm", null, null, null, null, null, null, null, null, ""));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers()
                 .withLocales(FakeLocales.englishOnly().withUi("de").withDefault("de"));
         ctx.store().put(Scope.episode("ep-1"), "highlight",
                 new Highlight("Der Leuchtturm", Map.of("en", new HighlightTranslation("The lighthouse"))));
@@ -561,7 +577,7 @@ class SamplePluginTest {
     private static FakePluginContext contextWithBlobs(InMemoryPluginBlobs blobs, MapPluginConfig config,
                                                       String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        return new FakePluginContext(new InMemoryDocStore(), config, feeds, null, blobs);
+        return new FakePluginContext(new InMemoryDocStore(), config, feeds, null, blobs).withReadsAllUsers();
     }
 
     /** Stores one small PNG and hands back its ref. */
@@ -719,6 +735,17 @@ class SamplePluginTest {
     }
 
     @Test
+    void excerptSaysWhatThePageSaysNotItsMarkup() {
+        // Found against a running core: a table and a stray <style> reached og:description and the search
+        // snippet verbatim. Escaped, so harmless — and still not what the page shows, which ctx.sanitize
+        // renders without the style block and without the table's delimiter row.
+        String markdown = "Forty years.\n\n| Left | Centre |\n|:-----|:------:|\n| a | b |\n\n"
+                + "<style>body{display:none}</style><p style=\"color:red\">styled</p>";
+
+        assertEquals("Forty years. Left Centre a b styled", SamplePlugin.excerpt(markdown));
+    }
+
+    @Test
     void indexOmitsAContentlessHighlightItJustPruned() {
         // The prune and the listing come from the same pass on purpose. Published from a second walk, the
         // page could list an episode whose doc this pass had already removed.
@@ -814,10 +841,10 @@ class SamplePluginTest {
     private static FakePluginContext contextForSearch() {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken", "the-lighthouse")))
                 .withDisplay("the-kraken",
-                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null))
+                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null, ""))
                 .withDisplay("the-lighthouse",
-                        new DisplaySnapshot("The Lighthouse", "notes", null, null, null, null, null, null, null));
-        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+                        new DisplaySnapshot("The Lighthouse", "notes", null, null, null, null, null, null, null, ""));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
         ctx.store().put(Scope.episode("the-kraken"), "highlight", new Highlight("the **squid** finally shows up"));
         return ctx;
     }
@@ -941,8 +968,8 @@ class SamplePluginTest {
     void exportsTheEpisodesAVisitorMarkedWithTitlesCoreCouldNotSupply() {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of("the-kraken")))
                 .withDisplay("the-kraken",
-                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null));
-        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+                        new DisplaySnapshot("The Kraken", "notes", null, null, null, null, null, null, null, ""));
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
         UUID visitor = UUID.randomUUID();
         UUID somebodyElse = UUID.randomUUID();
         ctx.store().asUser(visitor).put(Scope.user(), "fav:the-kraken", true);
@@ -977,7 +1004,7 @@ class SamplePluginTest {
 
     private static FakePluginContext contextWithTags(FakeTags tags, String... episodeIds) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeIds)));
-        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withTags(tags);
+        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers().withTags(tags);
     }
 
     @Test
@@ -1202,8 +1229,8 @@ class SamplePluginTest {
     private static FakePluginContext contextWithDisplay(String episodeId) {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.site(), List.of(episodeId)))
                 .withDisplay(episodeId,
-                        new DisplaySnapshot("The Kraken", null, null, null, null, null, null, null, null));
-        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null);
+                        new DisplaySnapshot("The Kraken", null, null, null, null, null, null, null, null, ""));
+        return new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(), feeds, null).withReadsAllUsers();
     }
 
     @Test

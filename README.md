@@ -321,7 +321,7 @@ modal inside an already-portalled modal is more machinery than one destructive c
 ### Backend `PluginContext` (ARCHITECTURE §7.4) — `backend/.../SamplePlugin.java`
 | Member | What this plugin does with it |
 |---|---|
-| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `store().queryAcrossUsers("fav:")` (0.5.0, backend-only, no HTTP surface) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
+| `store()` | The highlight doc (frontend-written, per scope), the `stats` doc (backend-written aggregate), and the site-wide `settings` doc (frontend-written by the admin panel, frontend-read by every `Highlight` instance). `recomputeHighlightStats` reads highlights back via `store().query(...)`, this plugin's one use of the Jackson-3-shaped `DocEntry.value(): JsonNode` a prefix scan hands back (every other read goes through the typed `store().get(..., Class)`, which never sees Jackson at all). The same pass calls `store().delete(scope, key)` to **prune** contentless highlight docs — see "Removing a highlight" below for why that housekeeping exists. `allUsers().query("fav:")` (backend-only, no HTTP surface; declared as `data.readsAllUsers` since SDK 0.16.0) tallies every visitor's favourite mark and publishes the per-episode count — the one read that reaches into `USER` partitions, and the only one that can. The two keys it *writes* (`stats`, `favourites`) are declared [`data.backendOwned`](#backend-owned-keys-sdk-060) (0.6.0), so no client can forge them; the three the frontend writes are not. |
 | `blobs()` | New in 0.8.0 — the scheduled recompute also **sweeps orphaned images**: it collects every `image.ref` the highlight docs still name, pages `blobs().list(…)`, and deletes the rest. Nothing on this platform collects orphans, and a blob outlives the document that named it, so without this every swapped picture leaks a file. The frontend deletes the ref it just stopped pointing at; this is the net under it, for the tab closed mid-edit and the `remove` that failed. Since 2.16.0 an admin can put it in report-only mode with the `imageSweep` config field. See [below](#the-sweep-can-only-collect-what-the-backend-can-enumerate) for the constraint that shapes it. |
 | `locales()` | New in 0.10.0 — the recompute pass reads `contentLocales()`/`defaultLocale()` once per pass (a registry an admin edits, so re-reading it mid-walk would let a setting change halfway through), and runs **`isContentLocale(code)` on every `translations` key it reads**. Those keys are client input: they sit inside a JSON value, so the host's doc-key pattern never sees them. A key that fails is **counted and left alone** — see [below](#two-locale-lists-and-picking-the-wrong-one-is-silent-sdk-0100) for why deleting would be the wrong call. |
 | `translation()` | New in 0.10.0 — the same pass **drafts** the languages nobody has written yet into a separate `backendOwned` `drafts` document the edit modal offers and a reader never sees. `null` on the manifest alone here: `usedBy` is browser-only, because a backend runs on a timer with no visitor and no role. `TranslationException` is **checked**, and `retryable()` decides whether the pass stops or moves to the next language. Capped at five calls a pass — this runs unattended, on somebody else's metered API. See [below](#machine-translation-is-a-draft-and-says-so-twice-sdk-0110). |
@@ -408,7 +408,7 @@ and no consent category.
 `authorId` lives in a **shared-scope document**, and a shared-scope document has no owner: anything above
 `data.writableBy` could `PUT` any UUID there, exactly as it could rewrite the prose next to it. Nothing in
 this plugin decides anything on it. The user ids it genuinely knows to be true are the ones the *host*
-resolves from a partition — the `fav:` marks `queryAcrossUsers` reads, where the owner comes from the
+resolves from a partition — the `fav:` marks `ctx.allUsers()` reads, where the owner comes from the
 partition the document sits in and never from a client.
 
 It is also **preserve-or-set**, not overwrite: a second podcaster fixing a typo is not the author.
@@ -481,7 +481,7 @@ tick, so the record *is* advanced — a plugin retrying a malformed link forever
 ### Two capabilities this plugin declines, and why
 
 - **No favouriter avatars.** The trustworthy user ids here are the favouriters', not the author's — they come
-  from `queryAcrossUsers`, host-resolved from the partition. Publishing them as an "also favourited by" row
+  from `ctx.allUsers()`, host-resolved from the partition. Publishing them as an "also favourited by" row
   would have been the textbook §8.8 leaderboard. It is not here because the whole `data/user/me/fav:<slug>`
   design rests on a mark being unreachable from any browser but its owner's, and publishing the list would
   undo that with the plugin's own hands. Notifying somebody is not the same as naming them to a stranger: the
@@ -672,7 +672,8 @@ have to be the same fact**; getting one right and not the other is worse than de
 the same lesson `OgMeta.locale` taught above, from the other end.
 
 ### Verified against a running core
-`dev/instance.sh up --plugins` in the core checkout, one highlight translated into German and one not:
+`dev/instance.sh up --plugins` in the core checkout (today: `--name sample up --plugin-dir …/dist`, see
+[Your first plugin](#your-first-plugin-in-5-minutes)), one highlight translated into German and one not:
 
 | Checked | Result |
 |---|---|
@@ -920,17 +921,18 @@ key. That is the exact inverse of the old convention, and it is the whole point:
 
 **Counting it is the backend's job.** Per-user docs are not addressable from another browser, by design, so
 a tally cannot be assembled client-side any more. It never should have been: a summary each browser reports
-about itself is a summary of whatever its user typed. `SamplePlugin.tallyFavourites` uses the 0.5.0
-backend-only read instead, and publishes the result where the frontend can read it:
+about itself is a summary of whatever its user typed. `SamplePlugin.tallyFavourites` uses the backend-only
+cross-user read instead — declared in the manifest as `"data": { "readsAllUsers": true }` since SDK 0.16.0,
+without which `ctx.allUsers()` is `null` — and publishes the result where the frontend can read it:
 
 ```java
-for (OwnedDocEntry entry : ctx.store().queryAcrossUsers("fav:")) { … }   // userId is host-resolved
+for (OwnedDocEntry entry : ctx.allUsers().query("fav:")) { … }   // userId is host-resolved
 ctx.store().put(Scope.episode(slug), "favourites", new FavouriteCount(n));
 ```
 
 Two consequences worth copying:
 - **A backend has no calling user**, so *every* `DocStore` method — reads included — throws
-  `UnsupportedOperationException` for a `USER` scope. `queryAcrossUsers` is the only door, and it has no
+  `UnsupportedOperationException` for a `USER` scope. `ctx.allUsers()` is the only door, and it has no
   HTTP surface, so no visitor's request can reach another visitor's data through it.
 - **Zero is a deletion, not a `{"count": 0}`**: an episode nobody favourited and one whose last favourite
   was withdrawn are the same state. `SamplePluginTest` asserts both directions, seeding what a frontend
@@ -1067,9 +1069,10 @@ the change is immediate and visible to anonymous visitors too.
 `plugin.json` declares four **services** under `consent.services[]` (not the pre-0.4.0
 `{categories, externalSources}` shape, which 0.4.0 rejects at load): `plausible-highlight-analytics`
 (category `analytics`), `host-badge-cdn` (category `functional`), `share-widget` (category `social`,
-arbitrary/unknown to the host — it passes an undeclared category through verbatim, proving a plugin isn't
-limited to `necessary`/`functional`/`analytics`), and `highlight-plugin-badge` (category `necessary` — see
-below). Each service's `hosts[]` is also the CSP allow-list for that origin — an origin left out stays
+which core has no label for, so the manifest supplies one in `consent.categoryLabels` since SDK 0.16.0,
+proving a plugin isn't limited to `necessary`/`functional`/`analytics`), and `highlight-plugin-badge`
+(category `necessary` — see below). All four hosts are placeholders that never resolve; the badges are
+`FallbackImg`s, so a visitor sees the consent flow and never a broken image. Each service's `hosts[]` is also the CSP allow-list for that origin — an origin left out stays
 blocked even after consent is granted, and, since core's storage/CSP-enforcement update, **narrowed per
 visitor**: the server mirrors the decision into an `mc_consent` cookie and only widens the CSP by what that
 cookie actually grants, so a declined category is a blocked request at the network layer, not just a
@@ -1283,6 +1286,16 @@ export MOSAICAST_PLUGINS_DIR=/path/to/core/plugins
 ./install.sh                        # copies dist/ to $MOSAICAST_PLUGINS_DIR/sample
 # restart mosaicast-core — the plugin loads and its slots render
 ```
+**No core of your own to restart?** With a `mosaicast-core` checkout next to this one, a disposable, seeded
+site that loads exactly your build — and cannot collide with anyone else's on the same machine (core 0.7.5):
+
+```bash
+../mosaicast-core/dev/instance.sh --name my-plugin up --plugin-dir "$PWD/dist"   # own DB, ports, plugins dir
+source <(../mosaicast-core/dev/instance.sh --name my-plugin env)                # $MC_APP_URL, never a fixed port
+../mosaicast-core/dev/instance.sh --name my-plugin down                         # only ever your own name
+```
+Repeat `--plugin-dir` to load a second plugin beside yours. `up` starts from a fresh database each time.
+
 From here, rename `id`/`name` in `plugin.json`, the Java package under `backend/src/main/java/...`, and the
 custom element tags in `frontend/src/sample-element.tsx`, and replace the highlight-note logic with your
 own.
@@ -1383,6 +1396,55 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.17.0** — SDK **0.16.1**, hosted by core **0.7.4**. The contract minor that came out of three test passes,
+  and this plugin had two of the things they found.
+  - **Security: highlight Markdown goes through `ctx.sanitize`.** Both render paths ran
+    `DOMPurify.sanitize(html)` with no config, which lets `<style>` and `style=` through — under the contract's
+    `style-src 'unsafe-inline'` a podcaster-written stylesheet is a full-viewport overlay over the site, or
+    attribute-selector CSS that leaks form values. The wiki plugin was defaced exactly that way.
+    `ctx.sanitize` is the host's own feed-HTML policy, run after Markdown rendering; the direct `dompurify`
+    dependency is gone, and `Highlight.test.tsx` fails if a stylesheet survives. One visible side effect: the
+    policy keeps only `href`s starting `http(s):`, `mailto:`, `tel:`, `#` or `/`, so a relative Markdown link
+    like `[notes](notes.html)` now renders as text with no link — write it as `/p/sample/…` or a full URL.
+    External links now open in a new tab with `rel="noopener noreferrer nofollow ugc"`.
+  - **SDK 0.16.1** widens that policy by `start` and `align`, so a numbered list that resumes after a paragraph
+    keeps its numbers and a table keeps its column alignment; `Highlight.test.tsx` pins both. The test kit's
+    `sanitizeLikeHost` now matches core element by element. The host applies whichever lists *it* was built
+    with: on core 0.7.4 a resumed list still renumbers from 1; **core 0.7.5 pins 0.16.1**, and a live 0.7.5
+    instance keeps `<ol start="3">` and every `align`. Tables get a border and scroll inside the tile rather
+    than widening it, now that they render as the author meant.
+  - **Excerpts say what the page says.** The plain-text excerpt behind `og:description`, the search snippet
+    and the page's card list passed raw HTML and table rules through as text — a `<style>` block the page
+    itself drops (via `ctx.sanitize`) showed up in the share preview as `<style>body{…}`, and a table as
+    `|:-----|:------:|`. Found on a running core, not by a unit test; `excerpt` now drops `<style>`/`<script>`
+    with their content, other tags, table delimiter rows and pipes.
+  - **`data.readsAllUsers: true`**, and the favourite tally reads through `ctx.allUsers()`.
+    `DocStore.queryAcrossUsers` no longer exists: reading every visitor's partition is now declared, so an
+    operator sees before installing that this plugin tallies its visitors' favourites. `everyonesFavourites`
+    throws if the declaration ever goes missing, rather than publishing "nobody favourited anything".
+  - **Text and links use `--mc-accent-text`** (12 rules); fills keep `--mc-accent`. The seed is unchecked
+    against the page — a pale one measured 1.12:1 as link text. (This plugin draws no focus rings of its own;
+    the browser's default outline applies.)
+  - **`refreshIntervalMinutes` declares `min: 1`, `max: 1440`, `step: 1`.** `0` used to save, and the backend's
+    clamp then quietly ran the rollup every minute — thirty times the default load, with the form showing
+    `0`. The host now refuses it on write, naming the bound; the clamp stays for a value stored before the
+    bound existed.
+  - **The `social` consent category has a name** (`consent.categoryLabels`): "Sharing buttons" /
+    "Teilen-Schaltflächen" with a one-line hint, instead of the bare id between two explained categories.
+  - **The empty page offers the action** ([#46](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/46)).
+    A podcaster or admin gets "Write the first highlight", linking to the newest episode's page (by the
+    feed's date, since `ctx.episodes` promises no order), and a link to the `unwritten` list. A visitor
+    who cannot write still gets the sentence. Both locales.
+  - **A failed image stands down** ([#47](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/47),
+    [#49](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/49)). `images.tsx` has `FallbackImg` and,
+    for the rendered Markdown, `hideFailedImages`. Decoration (avatars, badges, the editor preview) is hidden,
+    card thumbnails get the blank-star tile, and the podcaster's own picture leaves its alt text as text. The
+    consent demo keeps its placeholder hosts, because a consent-gated third-party load is what it
+    demonstrates; they fail quietly now and are logged through `ctx.log`. A one-line intro says what the
+    three consent buttons have in common.
+  - **Section titles are headings** ([#48](https://github.com/Mosaicast/mosaicast-plugin-sample/issues/48)):
+    `h2` for the highlight section and the settings panel, since every placement sits under the shell's `h1`,
+    and `h3` for the browse list. They look the same as before.
 - **2.16.0** — SDK **0.15.0**, hosted by core **0.7.2**. One contract minor, and unusually it is a release
   that fixes bugs this plugin *had* rather than adding a surface it lacked.
   - **[A schedule that follows its config](#two-ways-to-be-configurable--and-why-this-plugin-uses-both)** —

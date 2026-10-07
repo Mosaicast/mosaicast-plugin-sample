@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.16.0",
-  "platformApi": "0.15.0",
+  "version": "2.17.0",
+  "platformApi": "0.16.1",
   "name": "Sample",
   "license": "Apache-2.0",
   "author": "The Mosaicast Authors",
@@ -37,7 +37,8 @@
   "data": {
     "readableBy": "anonymous",
     "writableBy": "podcaster",
-    "backendOwned": ["stats", "favourites", "index", "drafts", "announced"]
+    "backendOwned": ["stats", "favourites", "index", "drafts", "announced"],
+    "readsAllUsers": true
   },
   "identity": {
     "resolvesUsers": true
@@ -64,6 +65,9 @@
       "type": "number",
       "default": 30,
       "editableBy": "podcaster",
+      "min": 1,
+      "max": 1440,
+      "step": 1,
       "label": { "en": "Refresh interval (minutes)", "de": "Aktualisierungsintervall (Minuten)" },
       "description": {
         "en": "How often the backend recomputes the highlight statistics, the page listing and the favourite counts. A saved change takes effect within one old interval — the backend does not have to be restarted.",
@@ -129,6 +133,15 @@
         "thirdCountryTransfer": false,
         "storage": []
       }
-    ]
+    ],
+    "categoryLabels": {
+      "social": {
+        "label": { "en": "Sharing buttons", "de": "Teilen-Schaltflächen" },
+        "hint": {
+          "en": "A widget from another company that lets you share a highlight on social networks.",
+          "de": "Ein Widget eines anderen Unternehmens, mit dem du ein Highlight in sozialen Netzwerken teilen kannst."
+        }
+      }
+    }
   }
 }

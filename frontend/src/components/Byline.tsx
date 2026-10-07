@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PluginContext, PluginI18n, UserRef } from '@mosaicast/plugin-sdk';
+import { FallbackImg } from '../images';
 
 /**
  * Who wrote a highlight, resolved from a UUID at render (SDK 0.13.0, `ctx.users`, ARCHITECTURE §8.8).
@@ -66,7 +67,8 @@ export function Byline({
           {/* No lazy loading and no dimensions to guess: the host serves a small square from its own
               origin, so this is one same-origin request that needs no CSP widening and no consent
               category — the picture is the host's, not a third party's. */}
-          <img src={who.avatarUrl} alt="" width={22} height={22} />
+          {/* Decoration beside the name, so a failed load simply goes (#49). */}
+          <FallbackImg src={who.avatarUrl} alt="" width={22} height={22} />
           <span>{i18n.t('byline.by', { name: who.displayName })}</span>
         </>
       ) : (
@@ -113,7 +115,8 @@ export function useAuthors(ctx: PluginContext, ids: string[]): Map<string, UserR
         // A byline is decoration on top of a highlight that reads fine without it, so a failure leaves the
         // map empty and every row falls through to the "former contributor" branch rather than showing an
         // error nobody can act on. Deliberately not `.catch(() => undefined)` on a `get`: this is a real
-        // rejection from a real call, not the 404 that means "nothing written yet".
+        // rejection from a real call, not the absent-document answer (a 204 since SDK 0.16.0) that `get`
+        // already turns into `null`.
         ctx.log('warn', 'resolving highlight authors failed; bylines will read as former contributors');
       });
     return () => {

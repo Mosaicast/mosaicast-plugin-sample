@@ -78,6 +78,48 @@ describe('Highlight — episode scope', () => {
     expect(container.innerHTML).not.toContain('<script>');
   });
 
+  it('drops a stylesheet in the markdown, which DOMPurify defaults let through (SDK 0.16.0)', async () => {
+    // The payload that defaced the wiki plugin: under the contract's `style-src 'unsafe-inline'` a
+    // podcaster-written `<style>` becomes a full-viewport overlay. `ctx.sanitize` applies the host's policy.
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
+          markdown: 'Fine <style>:host{position:fixed;inset:0}</style><span style="position:fixed">x</span>',
+        },
+      }),
+    });
+
+    const container = mount(ctx);
+    await flush();
+
+    const content = container.querySelector('.content')!;
+    expect(content.textContent).toContain('Fine');
+    expect(content.querySelector('style')).toBeNull();
+    expect(content.querySelector('[style]')).toBeNull();
+  });
+
+  it('keeps a resumed list number and table alignment through the sanitizer (SDK 0.16.1)', async () => {
+    // Ordinary Markdown the 0.16.0 policy broke: `marked` writes `<ol start="3">` for a list that resumes
+    // after a paragraph and `align` for a column's alignment. Dropping `start` renumbers from 1, which
+    // changes what the list says.
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      docs: makeMockDocs({
+        'data/episode/ep-1/highlight': {
+          markdown: '3. third\n4. fourth\n\n| Time | Topic |\n| :--: | ----- |\n| 12:00 | Kraken |',
+        },
+      }),
+    });
+
+    const container = mount(ctx);
+    await flush();
+
+    const content = container.querySelector('.content')!;
+    expect(content.querySelector('ol')?.getAttribute('start')).toBe('3');
+    expect(content.querySelector('th')?.getAttribute('align')).toBe('center');
+  });
+
   it('shows the fallback when there is no highlight yet', async () => {
     const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-2' } });
 
@@ -1195,5 +1237,102 @@ describe('Highlight — ctx.blobs (podcaster-uploaded image, SDK 0.8.0)', () => 
 
     expect(modal.querySelector('input[type="file"]')).toBeNull();
     await clickButton(modal, 'Cancel');
+  });
+});
+
+/** plugin-sample#48: the section titles are headings, so heading navigation finds them. */
+describe('Highlight — headings', () => {
+  it('titles the section with an h2, the level below every placement’s own h1', async () => {
+    const container = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } }));
+    await flush();
+
+    const title = container.querySelector('.title')!;
+    expect(title.tagName).toBe('H2');
+    expect(title.textContent).toBe('Episode Highlight');
+  });
+
+  it('nests the browse list under it as an h3', async () => {
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'site', id: 'main' },
+        episodes: ['ep-1'],
+        docs: makeMockDocs({ 'data/site/main/highlight': { markdown: 'Welcome' } }),
+      }),
+    );
+    await flush();
+
+    expect(container.querySelector('.browseTitle')!.tagName).toBe('H3');
+  });
+});
+
+/**
+ * plugin-sample#47, #49: an image that fails to load stands down. What it leaves behind depends on what it
+ * was for — decoration goes, content leaves its alt text.
+ */
+describe('Highlight — failed images', () => {
+  const fail = (img: Element) =>
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+
+  it('drops a consent badge whose host does not resolve, and tells the author through ctx.log', async () => {
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } });
+    const container = mount(ctx);
+    await flush();
+    const wordmark = container.querySelector('img.badge')!;
+
+    fail(wordmark);
+
+    expect(container.querySelector('img.badge')).toBeNull();
+    expect(container.textContent).not.toContain('Highlight plugin wordmark');
+    expect(ctx.logs).toContainEqual(
+      expect.objectContaining({ level: 'warn', message: expect.stringContaining('static.example') }),
+    );
+  });
+
+  it('explains what the consent buttons have in common', async () => {
+    const container = mount(makeMockCtx({ scope: { type: 'episode', id: 'ep-1' } }));
+    await flush();
+
+    expect(container.querySelector('.extras .intro')!.textContent).toContain('three things from other companies');
+  });
+
+  it('leaves the podcaster’s alt text as text when their picture fails', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+    const stored = await blobs.upload(new File([new Uint8Array(8)], 'cover.png', { type: 'image/png' }));
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'episode', id: 'ep-1' },
+        blobs,
+        docs: makeMockDocs({
+          'data/episode/ep-1/highlight': { markdown: 'The drop', image: { ref: stored.ref, alt: 'A waveform' } },
+        }),
+      }),
+    );
+    await flush();
+
+    fail(container.querySelector('img.image')!);
+
+    expect(container.querySelector('img.image')).toBeNull();
+    expect(container.querySelector('.imageAlt')!.textContent).toBe('A waveform');
+  });
+
+  it('hides a failed image inside the rendered Markdown', async () => {
+    const container = mount(
+      makeMockCtx({
+        scope: { type: 'episode', id: 'ep-1' },
+        docs: makeMockDocs({
+          'data/episode/ep-1/highlight': { markdown: 'Look ![a chart](https://blocked.example/chart.png)' },
+        }),
+      }),
+    );
+    await flush();
+    const img = container.querySelector<HTMLImageElement>('.content img')!;
+    expect(img.style.display).toBe('');
+
+    fail(img);
+
+    expect(img.style.display).toBe('none');
+    expect(container.querySelector('.content')!.textContent).toContain('Look');
   });
 });
