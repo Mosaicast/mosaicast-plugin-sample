@@ -325,7 +325,7 @@ describe('Highlight — episode scope', () => {
     // One click arms the confirm; it does not delete anything yet.
     await clickButton(modal, 'Remove');
     expect(storedIn(ctx)['data/episode/ep-1/highlight']).toBeDefined();
-    expect(modal.textContent).toContain('Remove this highlight permanently?');
+    expect(modal.textContent).toContain('Remove this highlight?');
 
     await clickButton(modal, 'Yes, remove');
 
@@ -394,7 +394,7 @@ describe('Highlight — episode scope', () => {
       message: 'highlight removal for episode ep-1 failed',
     });
     expect(findModalShadowRoot()).not.toBeNull();
-    expect(modal.textContent).toContain('This could not be loaded right now.');
+    expect(modal.textContent).toContain("This couldn't load right now.");
 
     // Portal lives on document.body — close it so it can't leak into the next test's global lookup.
     await clickButton(modal, 'Cancel');
@@ -811,7 +811,7 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
     const container = mount(ctx);
     await flush();
 
-    expect(container.textContent).toContain('Spoiler protection');
+    expect(container.textContent).toContain('Start listening to this episode');
     expect(container.textContent).not.toContain('The killer is');
 
     const revealButton = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Show anyway')!;
@@ -832,7 +832,7 @@ describe('Highlight — ctx.progress (opt-in spoiler gate)', () => {
     await flush();
 
     expect(container.textContent).toContain('The killer is');
-    expect(container.textContent).not.toContain('Spoiler protection');
+    expect(container.textContent).not.toContain('Start listening to this episode');
   });
 
   it('never gates a highlight that is not marked as a spoiler, regardless of progress', async () => {
@@ -856,7 +856,7 @@ describe('Highlight — ctx.episode.phase (SDK 0.18.0)', () => {
     const container = mount(at('planned', '2026-12-24T18:00:00Z'));
     await flush();
 
-    expect(container.textContent).toContain('goes public together with the episode');
+    expect(container.textContent).toContain('goes public with the episode');
     expect(container.textContent).not.toContain('Upcoming episode');
   });
 
