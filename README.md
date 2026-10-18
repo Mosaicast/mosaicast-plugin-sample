@@ -1438,6 +1438,11 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.20.2** (SDK **0.19.1**, core **0.8.2** or later). Wording only.
+  - **Every visitor and admin text follows the suite's writing guide.** Shorter, plainer English and German:
+    no dashes between clauses, no explanations a reader doesn't act on, "Folge" instead of "Episode" in
+    German, neutral words instead of gender colons. The demo consent services no longer say "Plugin" to a
+    visitor. Keys and placeholders are unchanged.
 - **2.20.1** — SDK **0.19.1**, hosted by core **0.8.2**. A patch release before the first public site.
   - **A burst of phase events costs one recompute, not one per episode.** Deleting a feed sends a phase event
     for every episode at once, each on its own thread (SDK 0.19.1 documents it). 2.20.0 ran a full recompute

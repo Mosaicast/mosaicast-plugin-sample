@@ -141,7 +141,7 @@ describe('TranslationEditor — translating', () => {
     act(() => tab(container, 'Deutsch').click());
     await act(async () => void button(container, 'Translate from')!.click());
     await flush();
-    expect(container.querySelector('.badge')?.textContent).toContain('read it before you save');
+    expect(container.querySelector('.badge')?.textContent).toContain('Read it before you save');
 
     // Typing is the human confirmation, and it also transfers authorship: the stored provenance flag goes
     // with it, because the words are now the podcaster's and claiming a machine wrote them would be the
@@ -185,7 +185,7 @@ describe('TranslationEditor — the ways translation is not there', () => {
 
     act(() => tab(container, 'Deutsch').click());
     expect(button(container, 'Translate from')).toBeUndefined();
-    expect(container.querySelector('.hint')?.textContent).toContain('No translation service');
+    expect(container.querySelector('.hint')?.textContent).toContain('no translation service');
     // The tab is still there, and still writable by hand. Absence of a machine is not absence of the
     // feature — this is the one thing the hint has to leave working.
     expect(container.querySelector('textarea')).not.toBeNull();
@@ -202,10 +202,10 @@ describe('TranslationEditor — the ways translation is not there', () => {
   });
 
   it.each([
-    [403, 'not allowed to use the translation service'],
+    [403, "can't use the translation service"],
     [409, 'switched off while you were writing'],
     [429, 'used up its translation allowance'],
-    [503, 'did not answer'],
+    [503, "didn't answer"],
   ])('shows the failure on %i rather than falling back to the original', async (status, expected) => {
     // The one call in this plugin where swallowing the error would be actively harmful: the podcaster would
     // save the English source into the German tab, and every German reader would be told it had been

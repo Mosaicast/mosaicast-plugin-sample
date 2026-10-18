@@ -1,6 +1,6 @@
 {
   "id": "sample",
-  "version": "2.20.1",
+  "version": "2.20.2",
   "platformApi": "0.19.1",
   "name": "Sample",
   "license": "Apache-2.0",
@@ -71,8 +71,8 @@
       "step": 1,
       "label": { "en": "Refresh interval (minutes)", "de": "Aktualisierungsintervall (Minuten)" },
       "description": {
-        "en": "How often the backend recomputes the highlight statistics, the page listing and the favourite counts. A saved change takes effect within one old interval — the backend does not have to be restarted.",
-        "de": "Wie oft das Backend die Highlight-Statistiken, die Seitenliste und die Favoritenzähler neu berechnet. Eine gespeicherte Änderung greift innerhalb eines alten Intervalls — das Backend muss nicht neu gestartet werden."
+        "en": "How often the highlight stats, page list and favourite counts are recomputed. A change applies within one interval, without a restart.",
+        "de": "Wie oft Highlight-Statistiken, Seitenliste und Favoritenzähler neu berechnet werden. Eine Änderung greift innerhalb eines Intervalls, ohne Neustart."
       }
     },
     "imageSweep": {
@@ -81,8 +81,8 @@
       "editableBy": "admin",
       "label": { "en": "Orphaned image sweep", "de": "Aufräumen verwaister Bilder" },
       "description": {
-        "en": "What the scheduled pass does with uploaded images no highlight points at any more. Nothing else on this platform collects them, so \"report\" leaks storage until someone acts on the log.",
-        "de": "Was der geplante Durchlauf mit hochgeladenen Bildern macht, auf die kein Highlight mehr zeigt. Nichts sonst auf dieser Plattform räumt sie ab, „melden“ lässt also Speicher liegen, bis jemand auf das Log reagiert."
+        "en": "What the scheduled cleanup does with uploaded images no highlight uses any more. With \"report\", they keep taking space until someone acts on the log.",
+        "de": "Was das geplante Aufräumen mit hochgeladenen Bildern macht, die kein Highlight mehr nutzt. Bei „melden“ belegen sie weiter Speicher, bis jemand auf das Log reagiert."
       },
       "options": [
         { "value": "delete", "label": { "en": "Delete them", "de": "Löschen" } },
@@ -95,7 +95,7 @@
       {
         "id": "plausible-highlight-analytics",
         "name": "Plausible Analytics (demo)",
-        "provider": "Plausible Insights OÜ (example — fake for this reference plugin)",
+        "provider": "Plausible Insights OÜ (example, fake for this reference plugin)",
         "category": "analytics",
         "privacyUrl": "https://plausible.example/privacy",
         "hosts": ["https://plausible.example"],
@@ -105,7 +105,7 @@
       {
         "id": "host-badge-cdn",
         "name": "Host Badge CDN (demo)",
-        "provider": "Example CDN Ltd. (example — fake for this reference plugin)",
+        "provider": "Example CDN Ltd. (example, fake for this reference plugin)",
         "category": "functional",
         "privacyUrl": "https://cdn.example.com/privacy",
         "hosts": ["https://cdn.example.com"],
@@ -115,7 +115,7 @@
       {
         "id": "share-widget",
         "name": "Share Widget (demo)",
-        "provider": "Example Share Inc. (example — fake for this reference plugin)",
+        "provider": "Example Share Inc. (example, fake for this reference plugin)",
         "category": "social",
         "privacyUrl": "https://share.example.com/privacy",
         "hosts": ["https://share.example.com"],
@@ -126,8 +126,8 @@
       },
       {
         "id": "highlight-plugin-badge",
-        "name": "Highlight Plugin Badge (demo)",
-        "provider": "Example Static Assets Ltd. (example — fake for this reference plugin)",
+        "name": "Highlight Badge (demo)",
+        "provider": "Example Static Assets Ltd. (example, fake for this reference plugin)",
         "category": "necessary",
         "privacyUrl": "https://static.example/privacy",
         "hosts": ["https://static.example"],
