@@ -10,6 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
+import tools.jackson.databind.JsonNode;
+import dev.mosaicast.plugin.testkit.SubscriptionRefusedException;
+import dev.mosaicast.plugin.testkit.FakeSubscription;
+import dev.mosaicast.plugin.testkit.ChannelEvent;
+import dev.mosaicast.plugin.testkit.Callers;
+import dev.mosaicast.plugin.api.Caller;
+import dev.mosaicast.plugin.api.ChannelRef;
+import dev.mosaicast.plugin.api.ActionRejectedException;
 import dev.mosaicast.plugin.api.ExportFile;
 import dev.mosaicast.plugin.api.UserExport;
 import dev.mosaicast.plugin.api.FeedAccess;
@@ -103,7 +111,8 @@ class SamplePluginTest {
     private static FakePluginContext contextEnforcingBackendOwnedKeys(String... episodeIds) {
         FakeFeedAccess feeds = released(episodeIds);
         InMemoryDocStore store = new InMemoryDocStore()
-                .withBackendOwned("stats", "favourites", "index", "drafts", "announced");
+                .withBackendOwned("stats", "favourites", "index", "drafts")
+                .withBackendPrivate("announced");
         return new FakePluginContext(store, new MapPluginConfig(), feeds, null).withReadsAllUsers();
     }
 
@@ -1769,5 +1778,145 @@ class SamplePluginTest {
             return new DisplaySnapshot(refId, null, null, null, null, null, null, null, null, "", null, null, null,
                     EpisodePhase.RELEASED, null);
         }
+    }
+
+    // ---- Realtime favourites (SDK 0.20.0: actions, channels, runAfter) ----------------------------------
+
+    /** ep-1 released, with a highlight; actions and channels declared as plugin.json declares them. */
+    private static FakePluginContext realtime() {
+        FakePluginContext ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(),
+                released("ep-1", "ep-2"), null)
+                .withReadsAllUsers()
+                .withActions(SamplePlugin.FAVOURITE_ACTION)
+                .withChannels();
+        ctx.store().put(Scope.episode("ep-1"), "highlight", new Highlight("the lighthouse"));
+        return ctx;
+    }
+
+    private static Optional<FavouriteCount> countDoc(FakePluginContext ctx, String slug) {
+        return ctx.store().get(Scope.episode(slug), "favourites", FavouriteCount.class);
+    }
+
+    @Test
+    void favouritingIsCountedTheMomentItIsClickedNotOnTheNextPass() {
+        // Until 2.21.0 the browser wrote its own mark and the shared count waited for the schedule. The action
+        // writes the caller's mark and recounts at once, from every partition, as the schedule would.
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        Caller ana = Callers.fan(UUID.randomUUID());
+        Caller ben = Callers.fan(UUID.randomUUID());
+
+        JsonNode first = ctx.actions().call(ana, SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"), Map.of("on", true));
+        JsonNode second = ctx.actions().call(ben, SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"), Map.of("on", true));
+
+        assertTrue(first.path("on").asBoolean());
+        assertEquals(1, first.path("count").asInt());
+        assertEquals(2, second.path("count").asInt());
+        assertEquals(Optional.of(new FavouriteCount(2)), countDoc(ctx, "ep-1"));
+        // The mark is in the caller's own partition — where a client write would have put it.
+        assertEquals(Optional.of(true), ctx.store().asUser(ana.userId()).get(Scope.user(), "fav:ep-1", Boolean.class));
+
+        JsonNode withdrawn = ctx.actions().call(ana, SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"), Map.of("on", false));
+        assertFalse(withdrawn.path("on").asBoolean());
+        assertEquals(1, withdrawn.path("count").asInt());
+        assertEquals(Optional.empty(), ctx.store().asUser(ana.userId()).get(Scope.user(), "fav:ep-1", Boolean.class),
+                "withdrawn is deleted, not stored as false");
+    }
+
+    @Test
+    void countsOnlyThisEpisodesMarkNotOneWhoseSlugStartsTheSame() {
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        UUID other = UUID.randomUUID();
+        ctx.store().asUser(other).put(Scope.user(), "fav:ep-10", true);   // the prefix query also returns this
+
+        JsonNode answer = ctx.actions().call(Callers.fan(UUID.randomUUID()), SamplePlugin.FAVOURITE_ACTION,
+                Scope.episode("ep-1"), Map.of("on", true));
+
+        assertEquals(1, answer.path("count").asInt());
+    }
+
+    @Test
+    void pushesTheNewCountToEveryoneWithTheEpisodeOpen() {
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        ChannelRef ref = new ChannelRef(Scope.episode("ep-1"), SamplePlugin.FAVOURITES_CHANNEL);
+        FakeSubscription watcher = ctx.channels().subscribe(Callers.fan(UUID.randomUUID()), ref);
+
+        ctx.actions().call(Callers.fan(UUID.randomUUID()), SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"),
+                Map.of("on", true));
+
+        List<ChannelEvent> got = watcher.events();
+        assertEquals(1, got.size());
+        assertEquals(SamplePlugin.FAVOURITE_COUNT_EVENT, got.get(0).event());
+        assertEquals(1, got.get(0).data().path("count").asInt());
+    }
+
+    @Test
+    void admitsSubscribersToAnEpisodesFavouritesAndNothingElse() {
+        // Without an authorizer every subscribe is refused; this one admits exactly the channel the page uses.
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        Caller fan = Callers.fan(UUID.randomUUID());
+
+        assertTrue(ctx.channels().subscribe(fan, new ChannelRef(Scope.episode("ep-1"), "favourites")).isOpen());
+        assertThrows(SubscriptionRefusedException.class,
+                () -> ctx.channels().subscribe(fan, new ChannelRef(Scope.episode("ep-1"), "chat")));
+        assertThrows(SubscriptionRefusedException.class,
+                () -> ctx.channels().subscribe(fan, new ChannelRef(Scope.site(), "favourites")));
+    }
+
+    @Test
+    void refusesAFavouriteOutsideAnEpisodeOrWithoutAnAnswer() {
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        Caller fan = Callers.fan(UUID.randomUUID());
+
+        ActionRejectedException site = assertThrows(ActionRejectedException.class,
+                () -> ctx.actions().call(fan, SamplePlugin.FAVOURITE_ACTION, Scope.site(), Map.of("on", true)));
+        assertEquals("not-an-episode", site.code());
+        ActionRejectedException empty = assertThrows(ActionRejectedException.class,
+                () -> ctx.actions().call(fan, SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"), Map.of()));
+        assertEquals("missing-on", empty.code());
+    }
+
+    @Test
+    void movesTheListingOnceAfterABurstOfFavouritesNotOncePerClick() {
+        // runAfter (SDK 0.20.0): each favourite pushes one listing refresh into the future, so the page's
+        // "most favourited" order catches up shortly after the burst — in one pass, and without the schedule.
+        FakePluginContext ctx = realtime();
+        plugin.register(ctx);
+        assertEquals(0, indexEntry(ctx, "ep-1").favourites());
+
+        for (int i = 0; i < 5; i++) {
+            ctx.actions().call(Callers.fan(UUID.randomUUID()), SamplePlugin.FAVOURITE_ACTION, Scope.episode("ep-1"),
+                    Map.of("on", true));
+            ctx.advanceTimers(Duration.ofSeconds(2));
+        }
+        assertEquals(1, ctx.pendingTimers(), "one debounced refresh, not five");
+        assertEquals(0, indexEntry(ctx, "ep-1").favourites(), "not yet: the burst is still going");
+
+        ctx.advanceTimers(SamplePlugin.INDEX_REFRESH_DELAY);
+
+        assertEquals(0, ctx.pendingTimers());
+        assertEquals(5, indexEntry(ctx, "ep-1").favourites());
+    }
+
+    private static IndexEntry indexEntry(FakePluginContext ctx, String slug) {
+        return ctx.store().get(Scope.site(), "index", HighlightIndex.class).orElseThrow()
+                .entries().stream().filter(e -> e.slug().equals(slug)).findFirst().orElseThrow();
+    }
+
+    @Test
+    void keepsAnnouncementBookkeepingFromEveryClientAdminsIncluded() {
+        // data.backendPrivate (SDK 0.20.0): `announced` is which languages were already told to whom — state only
+        // the backend reads. keyFloors topped out at admin; backendPrivate is nobody.
+        InMemoryDocStore store = new InMemoryDocStore().withBackendPrivate("announced");
+        store.put(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, new AnnouncedLocales(Set.of("de")));
+
+        assertThrows(RuntimeException.class, () -> store.asUser(UUID.randomUUID(), Role.ADMIN)
+                .get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class));
+        assertTrue(store.get(Scope.episode("ep-1"), SamplePlugin.ANNOUNCED_KEY, AnnouncedLocales.class).isPresent(),
+                "the backend's own store still reads it");
     }
 }

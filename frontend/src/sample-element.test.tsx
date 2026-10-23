@@ -83,8 +83,11 @@ describe('plugin.json ↔ bundle contract', () => {
     // good faith as something the site's own translation provider produced. `announced` joined them in
     // 2.15.0 with a third argument again: it is not content but the bookkeeping that decides whether a
     // notification goes out (SDK 0.14.0, §17), so a client able to write it could silence an announcement,
-    // or clear it and make the backend announce every translation to every favouriter a second time.
-    expect(data.backendOwned).toEqual(['stats', 'favourites', 'index', 'drafts', 'announced']);
+    // or clear it and make the backend announce every translation to every favouriter a second time. Since
+    // 2.21.0 it is `backendPrivate` instead (SDK 0.20.0): no client may read it either, admins included, which
+    // covers the write as well — so it no longer needs listing here.
+    expect(data.backendOwned).toEqual(['stats', 'favourites', 'index', 'drafts']);
+    expect(data.backendPrivate).toEqual(['announced']);
 
     // The mirror image, and the easier mistake: declaring a key the *frontend* writes locks this plugin out
     // of its own store. Each of these is written over HTTP by a component in this bundle.

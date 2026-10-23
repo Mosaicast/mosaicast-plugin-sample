@@ -182,16 +182,21 @@ describe('nav entries — the manifest and the page agree', () => {
       'data/episode/ep-1/highlight': { markdown: 'public' },
     };
     const fan = makeMockDocs(seeded, { data, viewer: 'fan' });
-    for (const key of ['drafts', 'announced']) {
-      await expect(fan.get({ type: 'episode', id: 'ep-1' }, key)).rejects.toMatchObject({
-        status: 403,
-        problem: { type: PROBLEM_TYPES.keyFloor },
-      });
-    }
+    await expect(fan.get({ type: 'episode', id: 'ep-1' }, 'drafts')).rejects.toMatchObject({
+      status: 403,
+      problem: { type: PROBLEM_TYPES.keyFloor },
+    });
     await expect(fan.get({ type: 'episode', id: 'ep-1' }, 'highlight')).resolves.toEqual({ markdown: 'public' });
     // The editor that offers the drafts is a podcaster's, and still reads them.
     const podcaster = makeMockDocs(seeded, { data, viewer: 'podcaster' });
     await expect(podcaster.get({ type: 'episode', id: 'ep-1' }, 'drafts')).resolves.toEqual({ drafts: [] });
+    // `announced` moved to `backendPrivate` in 2.21.0 (SDK 0.20.0): a key floor tops out at admin, and nobody
+    // but the backend has a reason to read it. Refused to every client, an admin included, with its own type.
+    const admin = makeMockDocs(seeded, { data, viewer: 'admin' });
+    await expect(admin.get({ type: 'episode', id: 'ep-1' }, 'announced')).rejects.toMatchObject({
+      status: 403,
+      problem: { type: PROBLEM_TYPES.backendPrivateKey },
+    });
   });
 
   it('never offers the detail route as an entrance', () => {

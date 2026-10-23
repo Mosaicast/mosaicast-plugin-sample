@@ -7,7 +7,10 @@ import { act } from 'react';
 import {
   makeMockCtx,
   makeMockConsent,
+  actionRejection,
+  makeMockActions,
   makeMockBlobs,
+  makeMockChannels,
   makeMockDocs,
   makeMockEpisode,
   makeMockFeeds,
@@ -1366,5 +1369,85 @@ describe('Highlight — failed images', () => {
 
     expect(img.style.display).toBe('none');
     expect(container.querySelector('.content')!.textContent).toContain('Look');
+  });
+});
+
+describe('Highlight — favourites through an action and a channel (SDK 0.20.0)', () => {
+  const HIGHLIGHT = { 'data/episode/ep-1/highlight': { markdown: 'The drop' } };
+  const favButton = (root: ParentNode) =>
+    Array.from(root.querySelectorAll('button')).find((b) => b.hasAttribute('aria-pressed'));
+
+  it('calls the favourite action and shows the count it answers, not an optimistic guess', async () => {
+    const actions = makeMockActions({ favourite: (payload) => ({ on: (payload as { on: boolean }).on, count: 7 }) });
+    const docs = makeMockDocs(HIGHLIGHT);
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'ep-1' }, user: mockUser('u1', 'fan'), docs, actions });
+
+    const container = mount(ctx);
+    await flush();
+    await clickButton(container, 'Favourite this');
+    await flush();
+
+    expect(actions.calls.map((c) => [c.name, c.payload])).toEqual([['favourite', { on: true }]]);
+    expect(favButton(container)?.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('.favCount')?.textContent).toContain('7');
+    // The backend wrote the mark; the browser did not write it a second time behind the action's back.
+    expect(docs.stored['data/user/me/fav:ep-1']).toBeUndefined();
+  });
+
+  it('rolls the button back when the backend rejects, and logs the plugin’s code', async () => {
+    const actions = makeMockActions({
+      favourite: () => {
+        throw actionRejection('not-an-episode');
+      },
+    });
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: mockUser('u1', 'fan'),
+      docs: makeMockDocs(HIGHLIGHT),
+      actions,
+    });
+
+    const container = mount(ctx);
+    await flush();
+    await clickButton(container, 'Favourite this');
+    await flush();
+
+    expect(favButton(container)?.getAttribute('aria-pressed')).toBe('false');
+    expect(ctx.logs.some((l) => l.level === 'warn' && l.message.includes('rejected: not-an-episode'))).toBe(true);
+  });
+
+  it('moves the count when somebody else favourites, without a reload', async () => {
+    const channels = makeMockChannels({ scope: { type: 'episode', id: 'ep-1' } });
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: mockUser('u1', 'fan'),
+      docs: makeMockDocs({ ...HIGHLIGHT, 'data/episode/ep-1/favourites': { count: 2 } }),
+      channels,
+    });
+
+    const container = mount(ctx);
+    await flush();
+    expect(container.querySelector('.favCount')?.textContent).toContain('2');
+    expect(channels.subscriptions.map((s) => s.name)).toEqual(['favourites']);
+
+    await act(async () => channels.emit('favourites', 'count', { count: 3 }));
+
+    expect(container.querySelector('.favCount')?.textContent).toContain('3');
+  });
+
+  it('subscribes only for a signed-in visitor — an anonymous one still reads the published count', async () => {
+    const channels = makeMockChannels({ scope: { type: 'episode', id: 'ep-1' }, signedIn: false });
+    const ctx = makeMockCtx({
+      scope: { type: 'episode', id: 'ep-1' },
+      user: null,
+      docs: makeMockDocs({ ...HIGHLIGHT, 'data/episode/ep-1/favourites': { count: 4 } }),
+      channels,
+    });
+
+    const container = mount(ctx);
+    await flush();
+
+    expect(channels.subscriptions).toEqual([]);
+    expect(container.querySelector('.favCount')?.textContent).toContain('4');
   });
 });
