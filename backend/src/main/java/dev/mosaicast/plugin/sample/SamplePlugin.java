@@ -3,7 +3,11 @@
 
 package dev.mosaicast.plugin.sample;
 
+import dev.mosaicast.plugin.api.ActionCall;
+import dev.mosaicast.plugin.api.ActionRejectedException;
+import dev.mosaicast.plugin.api.Actions;
 import dev.mosaicast.plugin.api.BlobInfo;
+import dev.mosaicast.plugin.api.Channels;
 import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.EpisodePhase;
@@ -18,7 +22,9 @@ import dev.mosaicast.plugin.api.PageRouteProvider;
 import dev.mosaicast.plugin.api.PluginBackend;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.Role;
+import dev.mosaicast.plugin.api.Scheduled;
 import dev.mosaicast.plugin.api.Scope;
+import dev.mosaicast.plugin.api.ScopeType;
 import dev.mosaicast.plugin.api.SearchHit;
 import dev.mosaicast.plugin.api.SearchProvider;
 import dev.mosaicast.plugin.api.ShareMetadataProvider;
@@ -537,6 +543,135 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
                     phase == null ? "gone" : phase);
             requestRecompute(ctx);
         });
+        registerFavourites(ctx);
+    }
+
+    /** The action a signed-in visitor favourites an episode through (SDK 0.20.0, ARCHITECTURE §7.9). */
+    static final String FAVOURITE_ACTION = "favourite";
+
+    /** The episode channel a new favourite count is pushed on, to everyone with that episode open. */
+    static final String FAVOURITES_CHANNEL = "favourites";
+
+    /** The one event on {@link #FAVOURITES_CHANNEL}; its data is a {@link FavouriteCount}. */
+    static final String FAVOURITE_COUNT_EVENT = "count";
+
+    /**
+     * How long the site listing waits after the last favourite before it is recomputed. The episode's own
+     * count is exact at once; this is only the "most favourited" order on the page, which a burst of clicks
+     * should move once, not once per click.
+     */
+    static final Duration INDEX_REFRESH_DELAY = Duration.ofSeconds(10);
+
+    /** What the {@link #FAVOURITE_ACTION} payload says: favourite it ({@code true}) or withdraw ({@code false}). */
+    record FavouriteRequest(Boolean on) {
+    }
+
+    /** What the {@link #FAVOURITE_ACTION} answers: the caller's mark as stored, and the count it produced. */
+    record FavouriteAnswer(boolean on, int count) {
+    }
+
+    /** Serialises favourite actions, so a count is never published after a newer one. */
+    private final Object favouriteLock = new Object();
+
+    /** The pending debounced listing refresh, if any; see {@link #scheduleIndexRefresh}. */
+    private Scheduled pendingIndexRefresh;
+
+    /**
+     * Wires favourites through an action and a channel (SDK 0.20.0).
+     *
+     * <p><strong>Why an action.</strong> Until 2.21.0 the browser wrote its own {@code fav:<slug>} mark and the
+     * shared count followed on the next scheduled pass — up to {@code refreshIntervalMinutes} later, so a visitor
+     * favourited something and watched the number not move. An action is plugin code at request time with a
+     * host-resolved caller: it writes the caller's mark through {@link ActionCall#store()} (the one store whose
+     * {@code USER} scope means the caller), recounts that one episode and answers with the result.
+     *
+     * <p><strong>Why a channel.</strong> Everybody else with the episode open sees the new count within a second
+     * instead of on their next load. Channels never store events, so the page subscribes first and then reads the
+     * {@code favourites} doc — the published count — and treats an event as "this changed".
+     *
+     * <p>Both are {@code null} unless the manifest declares them, and the plugin keeps working without: the
+     * schedule still counts every mark a client wrote directly.
+     */
+    private void registerFavourites(PluginContext ctx) {
+        Actions actions = ctx.actions();
+        if (actions != null) {
+            actions.handle(FAVOURITE_ACTION, call -> favourite(ctx, call));
+        }
+        Channels channels = ctx.channels();
+        if (channels != null) {
+            // Without an authorizer every subscribe is refused. The host has already checked the floor and that
+            // the caller may see the episode; the count is as public as the episode, so that is the whole rule.
+            channels.authorize((caller, ref) ->
+                    FAVOURITES_CHANNEL.equals(ref.name()) && ref.scope().type() == ScopeType.EPISODE);
+        }
+    }
+
+    /**
+     * Sets or withdraws the caller's favourite mark on the episode the call is scoped to, and publishes the
+     * episode's new count.
+     *
+     * <p>The caller comes from the host, never from the payload, and the host has already checked that they may
+     * see the episode. The mark lands in <em>their</em> partition — which they can also overwrite over HTTP, so
+     * it is a preference, not a fact; the count is still recomputed from every partition by the backend, exactly
+     * as the schedule does, and is the only number published.
+     *
+     * @throws ActionRejectedException {@code not-an-episode} for any other scope, {@code missing-on} without a
+     *                                 boolean {@code on}
+     */
+    private FavouriteAnswer favourite(PluginContext ctx, ActionCall call) {
+        if (call.scope().type() != ScopeType.EPISODE) {
+            throw new ActionRejectedException("not-an-episode", "favourites belong to an episode");
+        }
+        Boolean on = call.payload(FavouriteRequest.class).on();
+        if (on == null) {
+            throw new ActionRejectedException("missing-on", "send {\"on\": true} or {\"on\": false}");
+        }
+        String slug = call.scope().id();
+        String key = FAVOURITE_KEY_PREFIX + slug;
+        int count;
+        synchronized (favouriteLock) {
+            if (on) {
+                call.store().put(Scope.user(), key, true);
+            } else {
+                // A delete, not a stored `false`: a withdrawn favourite is no data at all.
+                call.store().delete(Scope.user(), key);
+            }
+            count = publishFavouriteCount(ctx, slug, countFavourites(ctx, slug));
+            Channels channels = ctx.channels();
+            if (channels != null) {
+                channels.channel(Scope.episode(slug), FAVOURITES_CHANNEL)
+                        .publish(FAVOURITE_COUNT_EVENT, new FavouriteCount(count));
+            }
+        }
+        scheduleIndexRefresh(ctx);
+        return new FavouriteAnswer(on, count);
+    }
+
+    /** Every visitor's live mark on one episode — the per-episode slice of {@link #tallyFavourites}. */
+    private static int countFavourites(PluginContext ctx, String slug) {
+        String key = FAVOURITE_KEY_PREFIX + slug;
+        int count = 0;
+        // The prefix query also matches `fav:<slug>-2`; only the exact key is this episode's mark.
+        for (OwnedDocEntry entry : everyonesFavourites(ctx, key)) {
+            if (entry.key().equals(key) && !isWithdrawnMark(entry.value())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Debounces the site listing after favourites change (SDK 0.20.0 {@code runAfter}): each call pushes the
+     * refresh {@link #INDEX_REFRESH_DELAY} into the future, so a burst of clicks costs one pass. In memory, so a
+     * restart drops it — harmless, since {@code register()} recomputes and the schedule reconciles anyway.
+     */
+    private void scheduleIndexRefresh(PluginContext ctx) {
+        synchronized (favouriteLock) {
+            if (pendingIndexRefresh != null) {
+                pendingIndexRefresh.cancel();
+            }
+            pendingIndexRefresh = ctx.runAfter(INDEX_REFRESH_DELAY, () -> requestRecompute(ctx));
+        }
     }
 
     /** Set by every phase event; cleared by the pass that will see its effect. See {@link #requestRecompute}. */
@@ -1238,12 +1373,17 @@ public class SamplePlugin implements PluginBackend, ShareMetadataProvider, Sitem
      * @throws IllegalStateException if the manifest no longer declares {@code data.readsAllUsers}
      */
     private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx) {
+        return everyonesFavourites(ctx, FAVOURITE_KEY_PREFIX);
+    }
+
+    /** {@link #everyonesFavourites(PluginContext)}, narrowed to keys starting with {@code prefix}. */
+    private static List<OwnedDocEntry> everyonesFavourites(PluginContext ctx, String prefix) {
         CrossUserStore everyone = ctx.allUsers();
         if (everyone == null) {
             throw new IllegalStateException(
                     "plugin.json no longer declares data.readsAllUsers, which favourite counts need");
         }
-        return everyone.query(FAVOURITE_KEY_PREFIX);
+        return everyone.query(prefix);
     }
 
     /**

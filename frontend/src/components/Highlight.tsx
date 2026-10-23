@@ -3,7 +3,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
-import { matchRoute, type BlobQuota, type PluginContext, type PluginRoute, type Scope } from '@mosaicast/plugin-sdk';
+import {
+  isActionRejected,
+  isRateLimited,
+  matchRoute,
+  type BlobQuota,
+  type PluginContext,
+  type PluginRoute,
+  type Scope,
+} from '@mosaicast/plugin-sdk';
 import { marked } from 'marked';
 import { makeI18n, nativeNameOf } from '../i18n';
 import { ICON_CSS, Icon } from '../icons';
@@ -17,7 +25,11 @@ import { FONT_STACKS, type SiteSettings } from './AdminSettings';
 import { describeApiError } from '../api-error';
 import { isFiltered, useShellFilteredEpisodes } from '../shell-filter';
 import {
+  FAVOURITE_ACTION,
+  FAVOURITE_COUNT_EVENT,
   FAVOURITE_COUNT_KEY,
+  FAVOURITES_CHANNEL,
+  type FavouriteAnswer,
   HIGHLIGHT_KEY,
   defaultLocaleOf,
   episodeTarget,
@@ -314,8 +326,7 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   const [favourite, setFavourite] = useState(false);
   const [favouriteCount, setFavouriteCount] = useState<number | undefined>(undefined);
 
-  useEffect(() => {
-    if (!isEpisode) return;
+  const loadFavouriteCount = useCallback(() => {
     ctx.docs
       .get<FavouriteCount>(episodeTarget(ctx.scope.id), FAVOURITE_COUNT_KEY)
       .then((doc) => setFavouriteCount(doc?.count))
@@ -323,7 +334,32 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
         setFavouriteCount(undefined);
         ctx.log('warn', 'favourite tally unavailable');
       });
-  }, [ctx, isEpisode]);
+  }, [ctx]);
+
+  // Live counts (SDK 0.20.0, channels): someone else favouriting this episode moves the number here within a
+  // second. Channels never store events, so the order is the contract's recipe: subscribe first, then read the
+  // published count, then apply events — and on `onReset` (events were missed) read it again. Signed-in only:
+  // a visitor without an account is refused without a request, and still gets the count from the doc.
+  const channels = ctx.channels;
+  const signedIn = ctx.user != null;
+  const episodeId = ctx.scope.id;
+  useEffect(() => {
+    if (!isEpisode) return;
+    const sub =
+      channels && signedIn
+        ? channels.subscribe(
+            FAVOURITES_CHANNEL,
+            (e) => {
+              if (e.event === FAVOURITE_COUNT_EVENT) setFavouriteCount((e.data as FavouriteCount).count);
+            },
+            { onReset: loadFavouriteCount },
+          )
+        : null;
+    loadFavouriteCount();
+    return () => sub?.close();
+    // `loadFavouriteCount` changes with every ctx, and a reassigned ctx must not resubscribe — the channel is
+    // the same while the episode, the client and the sign-in are.
+  }, [channels, signedIn, episodeId, isEpisode]);
 
   useEffect(() => {
     // An anonymous visitor has no partition at all — the host answers 401, so don't ask. This is the one
@@ -340,16 +376,39 @@ export function Highlight({ ctx }: { ctx: PluginContext }) {
   }, [ctx, isEpisode]);
 
   /**
-   * Toggles this visitor's own mark: `put` to set it, `delete` to withdraw it.
+   * Toggles this visitor's own mark.
    *
-   * Optimistic, and the displayed tally deliberately does **not** move with it — that number is
-   * recomputed on the backend's schedule, and faking it here would show a count the server would
-   * contradict on the next load. The pressed state is this visitor's truth; the tally is everyone's.
+   * Through the `favourite` action (SDK 0.20.0): the backend writes the mark into this visitor's partition,
+   * recounts the episode and answers with the real number, which is shown at once — no optimistic count, and
+   * no waiting for the next scheduled pass. A refusal carries a `code` and a rate limit a `retryAfterMs`; both
+   * roll the button back.
+   *
+   * Without an `actions` block `ctx.actions` is `null`; the older path then writes the mark directly and the
+   * count follows on the backend's schedule, exactly as before 2.21.0.
    */
   async function toggleFavourite() {
     const next = !favourite;
     const key = favouriteKey(ctx.scope.id);
     setFavourite(next);
+    if (ctx.actions) {
+      try {
+        const answer = await ctx.actions.call<FavouriteAnswer>(FAVOURITE_ACTION, { on: next });
+        if (answer) {
+          setFavourite(answer.on);
+          setFavouriteCount(answer.count);
+        }
+        ctx.log('info', `favourite ${next ? 'set' : 'cleared'} for ${ctx.scope.id}`);
+      } catch (e) {
+        setFavourite(!next);
+        const why = isActionRejected(e)
+          ? `rejected: ${e.problem.code}`
+          : isRateLimited(e)
+            ? `rate limited, retry in ${e.problem.retryAfterMs ?? '?'} ms`
+            : describeApiError(e).key;
+        ctx.log('warn', `favourite toggle for ${ctx.scope.id} failed (${why})`);
+      }
+      return;
+    }
     try {
       if (next) {
         await ctx.docs.put('self', key, true);

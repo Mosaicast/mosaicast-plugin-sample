@@ -1,7 +1,7 @@
 {
   "id": "sample",
-  "version": "2.20.2",
-  "platformApi": "0.19.1",
+  "version": "2.21.0",
+  "platformApi": "0.20.0",
   "name": "Sample",
   "license": "Apache-2.0",
   "author": "The Mosaicast Authors",
@@ -37,10 +37,13 @@
   "data": {
     "readableBy": "anonymous",
     "writableBy": "podcaster",
-    "backendOwned": ["stats", "favourites", "index", "drafts", "announced"],
-    "keyFloors": [{ "keys": ["drafts", "announced"], "readableBy": "podcaster" }],
+    "backendOwned": ["stats", "favourites", "index", "drafts"],
+    "keyFloors": [{ "keys": ["drafts"], "readableBy": "podcaster" }],
+    "backendPrivate": ["announced"],
     "readsAllUsers": true
   },
+  "actions": { "callableBy": "fan", "names": { "favourite": {} }, "perUserPerMinute": 30 },
+  "channels": { "subscribableBy": "fan", "perUserSubscriptions": 4 },
   "identity": {
     "resolvesUsers": true
   },

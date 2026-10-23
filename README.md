@@ -93,6 +93,7 @@ gotcha](#a-pf4j-gotcha-that-core-fixed--and-the-workaround-this-plugin-carried-f
 | `blobs` | New in 0.8.0 — an optional podcaster-uploaded **image** on a highlight, and the reason this plugin's manifest carries a [`blobs` block](#file-uploads-live-behind-a-manifest-declaration-sdk-080) at all (`ctx.blobs` is `null` without one). The edit modal reads `quota()` *before* a file is picked, `upload()`s the pick, stores only the returned **`ref`**, and `remove()`s whatever it stopped pointing at; the view derives the URL with `urlFor(ref)` at render time. Served same-origin, so unlike `ConsentExtras`' external `<img>` it needs no declared CSP host and makes no consent decision. |
 | `links` | New in 0.8.0 — `episode(slug, { t })` on every browse-index row and on the deep-link view (where `t` is the podcaster's own key moment, turning it into core's timestamp deep link), and `feed(slug, { season })` on the feed-scope filter note. Strings for real `href`s, never navigation — see [below](#links-vs-navigate-two-different-questions) for why this is separate from `ctx.route`. |
 | `users` | New in 0.13.0 — turns the author UUID stored on a highlight into a name and an avatar, at render. `components/Byline.tsx` does one row, `HighlightPage.tsx`'s credit strip does a whole listing in **one** `resolve`. `null` unless the manifest declares `identity`. An id that comes back **absent** (erased, pseudonymised, unknown) becomes a placeholder and the highlight stays — see [below](#a-byline-that-outlives-its-author-sdk-0130). |
+| `actions` / `channels` | New in 0.20.0 — the favourite button calls the `favourite` **action**: the backend writes the mark into the caller's own partition, recounts the episode and answers with the real count, shown at once. The new count is pushed on the episode's `favourites` **channel** to everyone else with it open. Both `null` without the manifest blocks, and then the button writes the mark directly as before. See [below](#favourites-in-real-time-sdk-0200). |
 | `notify` | New in 0.14.0, and the **second** `ctx` field this plugin does not exercise — deliberately. `ctx.notify` exists and this manifest declares `notifications`, but nothing a *visitor* does here is news to anybody else; the announcement worth sending finishes on a timer, so it is sent from the backend's `notifier()` instead. See [below](#the-one-surface-that-writes-into-somebody-elses-site-sdk-0140). |
 | `schema` | New in 0.7.0, and the **one** `ctx` field this plugin does not exercise — deliberately, because it cannot. `ctx.schema` is `null` unless the manifest declares `storage.schema`, and this one declares `"storage": "doc"`; the doc store is the default and covers nearly everything, so it is what the reference plugin should demonstrate. Reaching the schema client would mean changing what this plugin stores. Its Java half is the same story — see `schema()` below. |
 
@@ -467,7 +468,7 @@ anywhere could phish the site's own users in the site's own voice.
 
 ### Seeded on first sight, never backfilled
 
-The `announced` document (per episode, `backendOwned`) records which locales have already gone out. The first
+The `announced` document (per episode, `backendPrivate` since 2.21.0, `backendOwned` before) records which locales have already gone out. The first
 pass that sees an episode **records what it has and tells nobody**. Treating an absent record as "nothing
 announced yet" would fire one notification per existing translation at every existing favouriter the moment
 this version is installed — a spam cannon dressed as a migration. It is `backendOwned` for the mirror-image
@@ -854,6 +855,28 @@ batching helper of its own until 2.20.0.
 from the identity layer, not the feed's presentation, so the cards say "S2 · E14" from them — and the site
 tile narrows to a filtered season by them. Never parse `ctx.episodeLabels` for a season: it is a display
 string, and it drops the season of an unnumbered episode.
+
+## Favourites in real time (SDK 0.20.0)
+Until 2.21.0 a favourite was a document the browser wrote into its own partition, and the shared count only
+the backend could compute followed on its next scheduled pass. So a visitor clicked and watched the number not
+move for up to `refreshIntervalMinutes`. Three 0.20.0 surfaces fix that, each doing one thing (ARCHITECTURE §7.9):
+
+- **An action** (`"actions": { "names": { "favourite": {} } }`). `ctx.actions.call('favourite', { on })` runs
+  plugin code at request time with a **host-resolved caller**, never one from the payload. `ActionCall.store()`
+  is the one store whose `USER` scope means the caller, so the backend writes their mark, recounts that
+  episode from every partition and answers `{ on, count }`. The partition stays the visitor's own (they can
+  overwrite it over HTTP), so the count is recomputed from all marks, never trusted from the call.
+- **A channel** (`"channels": { … }`). The count is pushed to everyone with the episode open. Channels never
+  store events, so the page subscribes first, then reads the published `favourites` doc, then applies events,
+  and on `onReset` (events were missed) reads it again. A visitor who isn't signed in is refused without a
+  request and still sees the count from the doc. Without an authorizer every subscribe is refused; this one
+  admits `favourites` on an episode scope and nothing else.
+- **A timer.** The page's "most favourited" order comes from the site `index`, a whole-site pass. Each favourite
+  pushes one `ctx.runAfter(10 s)` refresh into the future, so a burst of clicks costs one pass. Timers live in
+  memory and a restart drops them, which is harmless: `register()` recomputes and the schedule still reconciles.
+
+`announced` also moved from `backendOwned` + a podcaster key floor to **`data.backendPrivate`**: it's bookkeeping
+only the backend reads, and a key floor tops out at `admin`.
 
 ## Quiet planned episodes (SDK 0.18.0)
 Core 0.7.7 lets a podcaster plan an episode before its feed item exists, and keep it **quiet**: only
@@ -1314,11 +1337,10 @@ keep the null check.**
 
 ## Your first plugin in 5 minutes
 **Prerequisites:** **Java 21** and **Node 22 or newer** (jsdom 30, which the tests run in, refuses
-anything older; Node 20 went end-of-life in April 2026). Beyond that, the SDK's Java artifacts
-(`dev.mosaicast:plugin-api`/`plugin-testkit`) are published to
-GitHub Packages, which requires authentication even for public reads. Export a GitHub PAT with
-`read:packages` before building the backend: `export GITHUB_TOKEN=<your PAT>` (and `GITHUB_ACTOR=<your
-username>` if `gradle.properties`' `gpr.user` isn't set). CI supplies this automatically.
+anything older; Node 20 went end-of-life in April 2026). Nothing else: the SDK's Java artifacts
+(`dev.mosaicast:plugin-api`/`plugin-testkit`) are on Maven Central since 0.19.2, so the backend builds
+with no token. Pinning an older SDK? Those versions exist only on GitHub Packages, which needs a
+`read:packages` PAT even for public reads.
 
 ```bash
 git clone <this-repo-url> my-plugin
@@ -1438,6 +1460,16 @@ frontend step is just `npm ci && npm run build`, so any toolchain that honors th
 that output path works unmodified.
 
 ## Changelog
+- **2.21.0** — SDK **0.20.0**, hosted by core **0.11.1** (which rejects every 0.19 plugin).
+  - **Favourites count the moment they're clicked.** The button calls the `favourite` action, which writes the
+    caller's mark, recounts the episode and answers with the real number. Before, the count waited for the
+    next scheduled pass. The new count is pushed on the episode's `favourites` channel to everyone with it
+    open, and a debounced `runAfter` moves the page's "most favourited" order once per burst of clicks. See
+    [Favourites in real time](#favourites-in-real-time-sdk-0200).
+  - **`announced` is `backendPrivate`**: no client reads or writes it, admins included.
+  - **The SDK's Java artifacts come from Maven Central**: no GitHub Packages block and no `read:packages` token
+    in the build or in CI any more.
+  - `docs/ARCHITECTURE.md` is core v0.11.1's.
 - **2.20.2** (SDK **0.19.1**, core **0.8.2** or later). Wording only.
   - **Every visitor and admin text follows the suite's writing guide.** Shorter, plainer English and German:
     no dashes between clauses, no explanations a reader doesn't act on, "Folge" instead of "Episode" in

@@ -129,8 +129,26 @@ export interface HighlightDoc {
  */
 export const HIGHLIGHT_KEY = 'highlight';
 
-/** How many visitors have favourited an episode's highlight — written by the backend's scheduled rollup. */
+/**
+ * How many visitors have favourited an episode's highlight. Written by the backend: by the `favourite` action
+ * the moment someone clicks (SDK 0.20.0), and by the scheduled rollup, which reconciles marks written directly.
+ */
 export interface FavouriteCount {
+  count: number;
+}
+
+/** The action the favourite button calls (`plugin.json` → `actions.names`). Mirrors `SamplePlugin.FAVOURITE_ACTION`. */
+export const FAVOURITE_ACTION = 'favourite';
+
+/** The episode channel new counts are pushed on. Mirrors `SamplePlugin.FAVOURITES_CHANNEL`. */
+export const FAVOURITES_CHANNEL = 'favourites';
+
+/** The event on {@link FAVOURITES_CHANNEL}; its `data` is a {@link FavouriteCount}. */
+export const FAVOURITE_COUNT_EVENT = 'count';
+
+/** What the `favourite` action answers: the caller's mark as stored, and the count it produced. */
+export interface FavouriteAnswer {
+  on: boolean;
   count: number;
 }
 
